@@ -8,6 +8,7 @@ import httpx
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
@@ -174,6 +175,14 @@ def extract_repos_from_messages(messages: List[Any]) -> List[Dict[str, Any]]:
 
 
 app = FastAPI(title="Portfolio Agent API", version="0.1.0")
+
+# Allow browser calls; replace origins with specific UI domains when known.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/health")
