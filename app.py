@@ -1,6 +1,7 @@
 """FastAPI app exposing a LangGraph-powered agent with a GitHub showcase tool."""
 
 import json
+import logging
 import os
 from typing import Any, Dict, List, Optional
 
@@ -20,6 +21,7 @@ load_dotenv()
 GITHUB_API_URL = "https://api.github.com"
 DEFAULT_LIMIT = 20
 GITHUB_USERNAME = os.getenv("GITHUB_USERNAME")
+logger = logging.getLogger(__name__)
 
 
 class AgentRequest(BaseModel):
@@ -200,6 +202,7 @@ async def agent_showcase(request: AgentRequest) -> AgentResponse:
                 "JSON in the shape {'repos': [...]}, where each repo has title, "
                 "description, readme, url, owner, stars, and topics."
             )
+            logger.info("Agent invocation", extra={"limit": request.limit, "query": request.query})
             result = await agent.ainvoke({"messages": [HumanMessage(content=agent_input)]})
             messages = result.get("messages", [])
             repos = extract_repos_from_messages(messages)
@@ -216,6 +219,7 @@ async def agent_showcase(request: AgentRequest) -> AgentResponse:
         except HTTPException:
             raise
         except Exception as exc:  # noqa: BLE001
+            logger.exception("Agent failed")
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     try:
