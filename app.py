@@ -3,17 +3,19 @@
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional, TypedDict
 
 import httpx
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
-from langgraph.prebuilt import create_react_agent
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel, Field, HttpUrl
 
 load_dotenv()
@@ -22,6 +24,19 @@ GITHUB_API_URL = "https://api.github.com"
 DEFAULT_LIMIT = 20
 GITHUB_USERNAME = os.getenv("GITHUB_USERNAME")
 logger = logging.getLogger(__name__)
+
+SYSTEM_PROMPT = (
+    "You are a portfolio data agent. Use the available tools to gather repository "
+    "data when needed. Choose the most appropriate tool based on its description. "
+    "When you respond, return a JSON object with key 'repos' containing a list of "
+    "repositories. Each repo must include title, description, readme, url, owner, "
+    "stars, and topics. If no data is available, return {'repos': []}."
+)
+
+
+class AgentState(TypedDict):
+    messages: Annotated[List[Any], add_messages]
+    repos: Optional[List[Dict[str, Any]]]
 
 
 class AgentRequest(BaseModel):
@@ -125,16 +140,44 @@ def build_agent_graph():
         model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         temperature=0,
     )
-    system_prompt = (
-        "You are a portfolio data agent. Always call the fetch_showcase_repos tool. "
-        "Return only JSON in the format {'repos': [...]} where each repo includes "
-        "title, description, readme, url, owner, stars, and topics."
+    llm_with_tools = llm.bind_tools(tools)
+
+    async def call_model(state: AgentState) -> Dict[str, Any]:
+        messages = state.get("messages", [])
+        response = await llm_with_tools.ainvoke(
+            [SystemMessage(content=SYSTEM_PROMPT), *messages]
+        )
+        return {"messages": [response]}
+
+    def route_agent(state: AgentState) -> str:
+        messages = state.get("messages", [])
+        if not messages:
+            return "extract"
+        last_message = messages[-1]
+        if getattr(last_message, "tool_calls", None):
+            return "tools"
+        return "extract"
+
+    def extract_repos_node(state: AgentState) -> Dict[str, Any]:
+        repos = extract_repos_from_messages(state.get("messages", []))
+        return {"repos": repos}
+
+    graph = StateGraph(AgentState)
+    graph.add_node("agent", call_model)
+    graph.add_node("tools", ToolNode(tools))
+    graph.add_node("extract", extract_repos_node)
+    graph.add_edge(START, "agent")
+    graph.add_conditional_edges(
+        "agent",
+        route_agent,
+        {
+            "tools": "tools",
+            "extract": "extract",
+        },
     )
-    return create_react_agent(
-        llm,
-        tools,
-        messages_modifier=system_prompt,
-    )
+    graph.add_edge("tools", "agent")
+    graph.add_edge("extract", END)
+    return graph.compile()
 
 
 agent_graph = None
@@ -198,14 +241,12 @@ async def agent_showcase(request: AgentRequest) -> AgentResponse:
         try:
             agent = get_agent_graph()
             agent_input = (
-                f"{request.query} Limit results to {request.limit} and respond with "
-                "JSON in the shape {'repos': [...]}, where each repo has title, "
-                "description, readme, url, owner, stars, and topics."
+                f"{request.query} Limit results to {request.limit}."
             )
             logger.info("Agent invocation", extra={"limit": request.limit, "query": request.query})
             result = await agent.ainvoke({"messages": [HumanMessage(content=agent_input)]})
             messages = result.get("messages", [])
-            repos = extract_repos_from_messages(messages)
+            repos = result.get("repos") or extract_repos_from_messages(messages)
             if not repos:
                 raise HTTPException(status_code=502, detail="Agent did not return repository data.")
             final_text = ""
