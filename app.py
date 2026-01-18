@@ -351,10 +351,15 @@ async def agent_showcase(request: AgentRequest) -> AgentResponse:
             logger.debug(f"Agent result: {result}")
             messages = result.get("messages", [])
             logger.debug(f"Messages: {messages}")
-            tool_called = any(isinstance(message, ToolMessage) for message in messages)
+            turn_messages = messages
+            for i in range(len(messages) - 1, -1, -1):
+                if isinstance(messages[i], HumanMessage):
+                    turn_messages = messages[i + 1 :]
+                    break
+            tool_called = any(isinstance(message, ToolMessage) for message in turn_messages)
             repos: List[Dict[str, Any]] = []
             if tool_called:
-                repos = extract_repos_from_messages(messages)
+                repos = extract_repos_from_messages(turn_messages)
                 logger.debug(f"Extracted repos: {repos}")
                 if not repos:
                     raise HTTPException(
