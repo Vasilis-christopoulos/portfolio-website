@@ -23,7 +23,10 @@ async def main():
     query = "Fetch showcase repositories for the portfolio UI. Limit results to 5."
     logger.info(f"Running agent with query: {query}")
     
-    result = await agent.ainvoke({"messages": [HumanMessage(content=query)]})
+    result = await agent.ainvoke(
+        {"messages": [HumanMessage(content=query)]},
+        config={"configurable": {"thread_id": "debug"}},
+    )
     
     print("\n" + "="*80)
     print("AGENT RESULT:")

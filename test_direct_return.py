@@ -21,7 +21,10 @@ async def main():
     logger.info("EXECUTION FLOW:")
     logger.info("=" * 80)
     
-    result = await agent.ainvoke({"messages": [HumanMessage(content=query)]})
+    result = await agent.ainvoke(
+        {"messages": [HumanMessage(content=query)]},
+        config={"configurable": {"thread_id": "test-direct-return"}},
+    )
     
     messages = result.get("messages", [])
     logger.info(f"\nTotal messages in flow: {len(messages)}")

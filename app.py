@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
@@ -68,6 +69,10 @@ class AgentState(TypedDict):
 class AgentRequest(BaseModel):
     query: str = Field(default="Fetch showcase repositories for the portfolio UI.")
     limit: int = Field(default=DEFAULT_LIMIT, ge=1, le=50)
+    session_id: Optional[str] = Field(
+        default=None,
+        description="Client-provided session/thread id for conversation memory.",
+    )
     use_agent: bool = Field(
         default=True,
         description="Use the LLM agent. Set false to call the GitHub tool directly (useful for tests).",
@@ -168,6 +173,7 @@ def fetch_showcase_repos(limit: int = DEFAULT_LIMIT) -> List[Dict[str, Any]]:
 
 # Registry of tools that return complete data and don't need LLM post-processing
 DIRECT_RETURN_TOOLS = {"fetch_showcase_repos"}
+memory_saver = MemorySaver()
 
 
 def build_agent_graph():
@@ -245,7 +251,7 @@ def build_agent_graph():
             "end": END,
         },
     )
-    return graph.compile()
+    return graph.compile(checkpointer=memory_saver)
 
 
 agent_graph = None
@@ -337,7 +343,11 @@ async def agent_showcase(request: AgentRequest) -> AgentResponse:
                     f"If you call fetch_showcase_repos, use limit {request.limit}."
                 )
             logger.info("Agent invocation", extra={"limit": request.limit, "query": request.query})
-            result = await agent.ainvoke({"messages": [HumanMessage(content=agent_input)]})
+            thread_id = request.session_id or "default"
+            result = await agent.ainvoke(
+                {"messages": [HumanMessage(content=agent_input)]},
+                config={"configurable": {"thread_id": thread_id}},
+            )
             logger.debug(f"Agent result: {result}")
             messages = result.get("messages", [])
             logger.debug(f"Messages: {messages}")
