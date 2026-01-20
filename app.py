@@ -14,13 +14,12 @@ import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel, Field, HttpUrl
 from supabase import Client, create_client
 
@@ -68,68 +67,193 @@ CHUNK_SIZE_CHARS = int(os.getenv("CHUNK_SIZE_CHARS", "1200"))
 CHUNK_OVERLAP_CHARS = int(os.getenv("CHUNK_OVERLAP_CHARS", "200"))
 
 SYSTEM_PROMPT = (
-    "You are a portfolio data agent. If the user greets or chats, respond conversationally without tools. "
-    "Use tools for explicit requests about repositories, projects, or profile/resume questions. "
-    "If the request is unclear, ask a short clarification question before using tools. "
-    "Choose the most appropriate tool based on its description. "
-    "Use fetch_showcase_repos for listing projects. "
-    "Use search_showcase_repos for targeted repo questions (e.g., 'computer vision'). "
-    "Use retrieve_profile_context for resume/background questions and answer only from that context. "
-    "Some tools return complete, ready-to-use data that doesn't need reformatting. "
-    "For other tools, you may need to process and structure the output."
+    "You are a portfolio data agent. Answer using the provided context. "
+    "If both repo and profile context are present, synthesize across them. "
+    "If the answer is missing from the context, ask a short clarification question. "
+    "Use cached repo summaries for comparisons when provided."
 )
 
-REPO_QUERY_KEYWORDS = (
-    "repo",
-    "repos",
-    "repository",
-    "repositories",
-    "project",
-    "projects",
-    "showcase",
-    "github",
-    "readme",
-    "stars",
-    "topic",
-    "topics",
+PLANNER_SYSTEM_PROMPT = (
+    "You are a planning assistant for a portfolio agent. "
+    "Decide which sources are needed. You may select multiple. "
+    "Return JSON only with fields: "
+    "{\"use_repo_list\": bool, \"use_repo_search\": bool, \"use_profile_search\": bool, "
+    "\"should_compare\": bool, \"need_clarification\": bool, \"clarification_question\": string, "
+    "\"skip_answer\": bool}. "
+    "Guidance: use_repo_list for listing/showcase requests; use_repo_search for topical repo questions; "
+    "use_profile_search for resume/background/experience; should_compare for ranking/choosing. "
+    "If the query could refer to either repos or CV experience, set both use_repo_search and use_profile_search. "
+    "If cached repos are available and the user asks to compare, you can set should_compare true and leave "
+    "retrieval false. If ambiguous, set need_clarification true and provide a short question. "
+    "For list-only requests like 'show me your projects', set only use_repo_list true and skip_answer true."
 )
 
-PROFILE_QUERY_KEYWORDS = (
-    "resume",
-    "cv",
-    "background",
-    "experience",
-    "skills",
-    "hire",
-    "hiring",
-    "why should i hire",
-    "profile",
-    "bio",
-    "about you",
-)
+MAX_CONTEXT_REPOS = 8
+MAX_SUMMARY_DESCRIPTION_CHARS = 200
+MAX_REPO_SEARCH_RESULTS = 5
+MAX_SNIPPET_CHARS = 400
+MAX_PROFILE_CHUNK_CHARS = 600
+
+DEFAULT_PLAN = {
+    "use_repo_list": False,
+    "use_repo_search": False,
+    "use_profile_search": False,
+    "should_compare": False,
+    "need_clarification": False,
+    "clarification_question": "",
+    "skip_answer": False,
+}
+
+def coerce_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes"}
+    return False
 
 
-def wants_repo_data(text: str) -> bool:
-    if not text:
-        return False
-    lowered = text.lower()
-    return any(keyword in lowered for keyword in REPO_QUERY_KEYWORDS)
+def parse_plan(raw: Any) -> Dict[str, Any]:
+    plan = DEFAULT_PLAN.copy()
+    data: Optional[Dict[str, Any]] = None
+    if isinstance(raw, dict):
+        data = raw
+    elif isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            data = parsed
+    if not data:
+        return plan
+    for key in (
+        "use_repo_list",
+        "use_repo_search",
+        "use_profile_search",
+        "should_compare",
+        "need_clarification",
+        "skip_answer",
+    ):
+        plan[key] = coerce_bool(data.get(key))
+    clarification = data.get("clarification_question")
+    if isinstance(clarification, str):
+        plan["clarification_question"] = clarification.strip()
+    if plan["need_clarification"] and not plan["clarification_question"]:
+        plan["clarification_question"] = "Could you clarify what you want to know?"
+    return plan
 
 
-def wants_profile_data(text: str) -> bool:
-    if not text:
-        return False
-    lowered = text.lower()
-    return any(keyword in lowered for keyword in PROFILE_QUERY_KEYWORDS)
+def get_last_user_text(messages: List[Any]) -> str:
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            return message.content
+    return ""
 
 
-def wants_tool_data(text: str) -> bool:
-    return wants_repo_data(text) or wants_profile_data(text)
+def truncate_text(value: Optional[str], limit: int) -> Optional[str]:
+    if not value:
+        return None
+    cleaned = value.strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[:limit].rstrip()
 
 
-class AgentState(TypedDict):
+def build_repo_summaries(repos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    summaries: List[Dict[str, Any]] = []
+    for repo in repos[:MAX_CONTEXT_REPOS]:
+        summaries.append(
+            {
+                "repo_id": repo.get("repo_id"),
+                "title": repo.get("title"),
+                "description": truncate_text(
+                    repo.get("description"),
+                    MAX_SUMMARY_DESCRIPTION_CHARS,
+                ),
+                "url": repo.get("url"),
+                "owner": repo.get("owner"),
+                "stars": repo.get("stars", 0),
+                "topics": repo.get("topics", [])[:6],
+            }
+        )
+    return summaries
+
+
+def merge_repos_by_id(
+    primary: List[Dict[str, Any]],
+    secondary: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen = set()
+    for repo in primary + secondary:
+        repo_id = repo.get("repo_id")
+        if repo_id:
+            if repo_id in seen:
+                continue
+            seen.add(repo_id)
+        merged.append(repo)
+    return merged
+
+
+def trim_repo_search_results(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    trimmed: List[Dict[str, Any]] = []
+    for row in results[:MAX_REPO_SEARCH_RESULTS]:
+        snippets = row.get("snippets") or []
+        trimmed_snippets = []
+        for snippet in snippets[:2]:
+            if not isinstance(snippet, str):
+                continue
+            trimmed_snippets.append(truncate_text(snippet, MAX_SNIPPET_CHARS))
+        trimmed.append(
+            {
+                "repo_id": row.get("repo_id"),
+                "title": row.get("title"),
+                "description": truncate_text(
+                    row.get("description"),
+                    MAX_SUMMARY_DESCRIPTION_CHARS,
+                ),
+                "url": row.get("url"),
+                "owner": row.get("owner"),
+                "stars": row.get("stars"),
+                "topics": (row.get("topics") or [])[:6],
+                "snippets": trimmed_snippets,
+                "score": row.get("score"),
+            }
+        )
+    return trimmed
+
+
+def trim_profile_context(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    trimmed: List[Dict[str, Any]] = []
+    for row in results[:RAG_TOP_K]:
+        trimmed.append(
+            {
+                "content": truncate_text(row.get("content"), MAX_PROFILE_CHUNK_CHARS),
+                "source": row.get("source"),
+                "score": row.get("score"),
+            }
+        )
+    return trimmed
+
+
+def format_repo_summaries_for_context(summaries: List[Dict[str, Any]]) -> str:
+    trimmed = summaries[:MAX_CONTEXT_REPOS]
+    return json.dumps(trimmed, ensure_ascii=True)
+
+
+class AgentState(TypedDict, total=False):
     messages: Annotated[List[Any], add_messages]
     repos: Optional[List[Dict[str, Any]]]
+    plan: Optional[Dict[str, Any]]
+    last_repo_ids: Optional[List[str]]
+    last_repo_summaries: Optional[List[Dict[str, Any]]]
+    repo_summaries: Optional[List[Dict[str, Any]]]
+    repo_search_context: Optional[List[Dict[str, Any]]]
+    profile_context: Optional[List[Dict[str, Any]]]
+    clarification_question: Optional[str]
+    request_limit: Optional[int]
 
 
 class AgentRequest(BaseModel):
@@ -615,8 +739,6 @@ def retrieve_profile_context(query: str, limit: int = RAG_TOP_K) -> List[Dict[st
     logger.info("retrieve_profile_context: query=%r hits=%d", query, len(results))
     return results
 
-# Registry of tools that return ready-to-use data and don't need LLM post-processing
-DIRECT_RETURN_TOOLS = {"fetch_showcase_repos"}
 memory_saver = MemorySaver()
 
 
@@ -625,80 +747,173 @@ def build_agent_graph():
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is required to run the agent.")
 
-    tools = [fetch_showcase_repos, search_showcase_repos, retrieve_profile_context]
     llm = ChatOpenAI(
         model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         temperature=0,
     )
-    llm_with_tools = llm.bind_tools(tools)
+    planner_llm = ChatOpenAI(
+        model=os.getenv("OPENAI_PLANNER_MODEL", os.getenv("OPENAI_MODEL", "gpt-4o-mini")),
+        temperature=0,
+    )
 
-    async def call_model(state: AgentState) -> Dict[str, Any]:
+    async def build_plan(state: AgentState) -> Dict[str, Any]:
         messages = state.get("messages", [])
-        last_user_text = ""
-        for message in reversed(messages):
-            if isinstance(message, HumanMessage):
-                last_user_text = message.content
-                break
-        use_tools = wants_tool_data(last_user_text)
-        if not use_tools:
-            recent_messages = messages[-4:] if len(messages) >= 4 else messages
-            for message in reversed(recent_messages):
-                if isinstance(message, HumanMessage) and wants_tool_data(message.content):
-                    use_tools = True
-                    break
-        model = llm_with_tools if use_tools else llm
-        response = await model.ainvoke(
-            [SystemMessage(content=SYSTEM_PROMPT), *messages]
+        last_user_text = get_last_user_text(messages)
+        if not last_user_text:
+            return {"plan": DEFAULT_PLAN.copy()}
+        has_cached_repos = bool(state.get("last_repo_summaries"))
+        request_limit = state.get("request_limit") or DEFAULT_LIMIT
+        planner_prompt = (
+            f"User message: {last_user_text}\n"
+            f"Cached repos available: {has_cached_repos}\n"
+            f"Requested limit: {request_limit}"
         )
+        response = await planner_llm.ainvoke(
+            [
+                SystemMessage(content=PLANNER_SYSTEM_PROMPT),
+                HumanMessage(content=planner_prompt),
+            ]
+        )
+        plan = parse_plan(getattr(response, "content", ""))
+        return {"plan": plan}
+
+    def execute_plan(state: AgentState) -> Dict[str, Any]:
+        plan = state.get("plan") or DEFAULT_PLAN
+        messages = state.get("messages", [])
+        last_user_text = get_last_user_text(messages)
+        request_limit = state.get("request_limit") or DEFAULT_LIMIT
+        if plan.get("need_clarification"):
+            return {
+                "clarification_question": plan.get("clarification_question")
+                or "Could you clarify what you want to know?"
+            }
+        update: Dict[str, Any] = {}
+        repos_from_list: List[Dict[str, Any]] = []
+        repo_search_results: List[Dict[str, Any]] = []
+        profile_results: List[Dict[str, Any]] = []
+        repo_ids: List[str] = []
+        if plan.get("use_repo_list"):
+            list_result = fetch_showcase_repos.invoke({"limit": request_limit})
+            repo_ids = list_result.get("repo_ids", [])
+            if repo_ids:
+                repos_from_list = load_repos_by_ids(repo_ids)
+        if plan.get("use_repo_search") and last_user_text:
+            repo_search_results = search_showcase_repos.invoke(
+                {
+                    "query": last_user_text,
+                    "limit": MAX_REPO_SEARCH_RESULTS,
+                }
+            )
+        if plan.get("use_profile_search") and last_user_text:
+            profile_results = retrieve_profile_context.invoke(
+                {
+                    "query": last_user_text,
+                    "limit": RAG_TOP_K,
+                }
+            )
+        repos_for_response: List[Dict[str, Any]] = []
+        if repo_search_results:
+            repos_for_response = repo_search_results
+        if repos_from_list:
+            repos_for_response = merge_repos_by_id(
+                repos_for_response,
+                repos_from_list,
+            )
+        if plan.get("should_compare") and not repos_for_response:
+            cached_ids = state.get("last_repo_ids") or []
+            cached_summaries = state.get("last_repo_summaries") or []
+            if cached_ids:
+                repos_for_response = load_repos_by_ids(cached_ids)
+            elif cached_summaries:
+                repos_for_response = cached_summaries
+        if repos_for_response:
+            update["repos"] = repos_for_response
+            update["repo_summaries"] = build_repo_summaries(repos_for_response)
+            update["last_repo_summaries"] = update["repo_summaries"]
+            seen_ids = set()
+            ordered_ids: List[str] = []
+            for repo in repos_for_response:
+                repo_id = repo.get("repo_id")
+                if repo_id and repo_id not in seen_ids:
+                    seen_ids.add(repo_id)
+                    ordered_ids.append(repo_id)
+            if ordered_ids:
+                update["last_repo_ids"] = ordered_ids
+        if repo_search_results:
+            update["repo_search_context"] = trim_repo_search_results(repo_search_results)
+        if profile_results:
+            update["profile_context"] = trim_profile_context(profile_results)
+        return update
+
+    async def answer(state: AgentState) -> Dict[str, Any]:
+        plan = state.get("plan") or DEFAULT_PLAN
+        if plan.get("need_clarification"):
+            question = state.get("clarification_question") or "Could you clarify what you want to know?"
+            return {"messages": [AIMessage(content=question)]}
+        messages = state.get("messages", [])
+        context_messages: List[Any] = [SystemMessage(content=SYSTEM_PROMPT)]
+        repo_search_context = state.get("repo_search_context") or []
+        profile_context = state.get("profile_context") or []
+        repo_summaries = state.get("repo_summaries") or []
+        if repo_search_context:
+            context_messages.append(
+                SystemMessage(
+                    content=(
+                        "Repo search results:\n"
+                        f"{json.dumps(repo_search_context, ensure_ascii=True)}"
+                    )
+                )
+            )
+        if profile_context:
+            context_messages.append(
+                SystemMessage(
+                    content=(
+                        "Profile context:\n"
+                        f"{json.dumps(profile_context, ensure_ascii=True)}"
+                    )
+                )
+            )
+        if plan.get("should_compare") and repo_summaries:
+            context_messages.append(
+                SystemMessage(
+                    content=(
+                        "Repo summaries for comparison:\n"
+                        f"{json.dumps(repo_summaries, ensure_ascii=True)}"
+                    )
+                )
+            )
+        response = await llm.ainvoke([*context_messages, *messages])
         return {"messages": [response]}
 
-    def should_skip_llm(state: AgentState) -> bool:
-        """Check if the last tool call was a direct_return tool."""
-        messages = state.get("messages", [])
-        if not messages:
+    def should_skip_answer(state: AgentState) -> bool:
+        plan = state.get("plan") or DEFAULT_PLAN
+        if plan.get("need_clarification"):
             return False
-        
-        # Find the most recent AIMessage with tool_calls to see which tool was called
-        for msg in reversed(messages):
-            if hasattr(msg, 'tool_calls') and msg.tool_calls:
-                tool_name = msg.tool_calls[0]['name']
-                return tool_name in DIRECT_RETURN_TOOLS
-        
-        return False
-    
-    def route_agent(state: AgentState) -> str:
-        messages = state.get("messages", [])
-        if not messages:
+        if plan.get("skip_answer"):
+            return True
+        return (
+            plan.get("use_repo_list")
+            and not plan.get("use_repo_search")
+            and not plan.get("use_profile_search")
+            and not plan.get("should_compare")
+        )
+
+    def route_after_retrieve(state: AgentState) -> str:
+        if should_skip_answer(state):
             return "end"
-        last_message = messages[-1]
-        if getattr(last_message, "tool_calls", None):
-            return "tools"
-        return "end"
-    
-    def route_after_tools(state: AgentState) -> str:
-        """Route after tool execution: skip LLM for direct_return tools."""
-        if should_skip_llm(state):
-            return "end"
-        return "agent"
+        return "answer"
 
     graph = StateGraph(AgentState)
-    graph.add_node("agent", call_model)
-    graph.add_node("tools", ToolNode(tools))
-    graph.add_edge(START, "agent")
+    graph.add_node("planner", build_plan)
+    graph.add_node("retrieve", execute_plan)
+    graph.add_node("answer", answer)
+    graph.add_edge(START, "planner")
+    graph.add_edge("planner", "retrieve")
     graph.add_conditional_edges(
-        "agent",
-        route_agent,
+        "retrieve",
+        route_after_retrieve,
         {
-            "tools": "tools",
-            "end": END,
-        },
-    )
-    # After tools, conditionally route: direct_return tools skip LLM
-    graph.add_conditional_edges(
-        "tools",
-        route_after_tools,
-        {
-            "agent": "agent",
+            "answer": "answer",
             "end": END,
         },
     )
@@ -834,44 +1049,24 @@ async def agent_showcase(request: AgentRequest) -> AgentResponse:
     if request.use_agent:
         try:
             agent = get_agent_graph()
-            agent_input = request.query
-            if wants_repo_data(request.query):
-                agent_input = (
-                    f"{request.query}\n"
-                    f"If you call fetch_showcase_repos, use limit {request.limit}. "
-                    "If you call search_showcase_repos, use limit 5."
-                )
             logger.info("Agent invocation", extra={"limit": request.limit, "query": request.query})
             thread_id = request.session_id or "default"
             result = await agent.ainvoke(
-                {"messages": [HumanMessage(content=agent_input)]},
+                {
+                    "messages": [HumanMessage(content=request.query)],
+                    "request_limit": request.limit,
+                },
                 config={"configurable": {"thread_id": thread_id}},
             )
             logger.debug(f"Agent result: {result}")
             messages = result.get("messages", [])
             logger.debug(f"Messages: {messages}")
-            turn_messages = messages
-            for i in range(len(messages) - 1, -1, -1):
-                if isinstance(messages[i], HumanMessage):
-                    turn_messages = messages[i + 1 :]
-                    break
-            tool_called = any(isinstance(message, ToolMessage) for message in turn_messages)
-            repos: List[Dict[str, Any]] = []
-            if tool_called:
-                repo_ids = extract_repo_ids_from_messages(turn_messages)
-                if repo_ids:
-                    repos = load_repos_by_ids(repo_ids)
-                if wants_repo_data(request.query) and not repos:
-                    repos = extract_repos_from_messages(turn_messages)
-                logger.debug(f"Extracted repos: {repos}")
-                if wants_repo_data(request.query) and not repos:
-                    raise HTTPException(
-                        status_code=502,
-                        detail="Agent did not return repository data.",
-                    )
+            repos = result.get("repos") or []
             final_text = ""
-            if messages:
-                final_text = getattr(messages[-1], "content", "")
+            for message in reversed(messages):
+                if isinstance(message, AIMessage):
+                    final_text = getattr(message, "content", "")
+                    break
             return AgentResponse(
                 repos=[ShowcaseRepo(**repo) for repo in repos] if repos else [],
                 source="agent",
