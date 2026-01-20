@@ -55,7 +55,7 @@ SUPABASE_PROFILE_MATCH_RPC = os.getenv(
     "SUPABASE_PROFILE_MATCH_RPC", "match_profile_chunks"
 )
 
-REPO_CACHE_TTL_SECONDS = int(os.getenv("REPO_CACHE_TTL_SECONDS", "21600"))
+REPO_CACHE_TTL_SECONDS = int(os.getenv("REPO_CACHE_TTL_SECONDS", "1800"))
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "1536"))
 RAG_TOP_K = int(os.getenv("RAG_TOP_K", "5"))
@@ -200,6 +200,15 @@ def to_pgvector_literal(vector: List[float]) -> str:
             raise ValueError("Embedding vector contains non-finite values.")
         parts.append(f"{value:.10f}")
     return "[" + ",".join(parts) + "]"
+
+
+def refresh_showcase_cache(limit: int, reason: str) -> None:
+    limit = max(1, min(limit, 50))
+    logger.info("Refreshing showcase cache reason=%s limit=%d", reason, limit)
+    repos = _fetch_showcase_repos(limit)
+    existing_hashes = get_repo_hashes([repo["repo_id"] for repo in repos])
+    upsert_repos_to_cache(repos)
+    refresh_repo_chunks(repos, existing_hashes)
 
 
 def parse_timestamp(value: Optional[str]) -> Optional[datetime]:
@@ -410,12 +419,13 @@ def match_profile_chunks(query: str, limit: int) -> List[Dict[str, Any]]:
 def get_showcase_repos(limit: int) -> List[Dict[str, Any]]:
     limit = max(1, min(limit, 50))
     repo_ids = fetch_cached_showcase_repo_ids(limit)
-    if not repo_ids:
-        repos = _fetch_showcase_repos(limit)
-        existing_hashes = get_repo_hashes([repo["repo_id"] for repo in repos])
-        upsert_repos_to_cache(repos)
-        refresh_repo_chunks(repos, existing_hashes)
-        repo_ids = [repo.get("repo_id") for repo in repos if repo.get("repo_id")]
+    if repo_ids:
+        return load_repos_by_ids(repo_ids)
+    repos = _fetch_showcase_repos(limit)
+    existing_hashes = get_repo_hashes([repo["repo_id"] for repo in repos])
+    upsert_repos_to_cache(repos)
+    refresh_repo_chunks(repos, existing_hashes)
+    repo_ids = [repo.get("repo_id") for repo in repos if repo.get("repo_id")]
     return load_repos_by_ids(repo_ids)
 
 def github_headers() -> Dict[str, str]:

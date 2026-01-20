@@ -11,8 +11,9 @@ Personal AI powered portfolio website. Chatbot interface tailored to recruiters 
    - `GITHUB_TOKEN` (optional)
    - `EMBEDDING_MODEL` (default `text-embedding-3-small`)
    - `EMBEDDING_DIMENSION` (default `1536`, must match schema)
-   - `REPO_CACHE_TTL_SECONDS` (default `21600`)
+   - `REPO_CACHE_TTL_SECONDS` (default `1800`)
    - `REPO_EMBEDDINGS_ON_REFRESH` (default `true`, set `false` to index offline)
+   - `PROFILE_NAME_KEYWORDS` (comma-separated names to match profile queries, e.g. `Vasileios,Vasilis,Christopoulos`)
 3) Index profile docs for RAG:
    - `python scripts/index_profile_docs.py path/to/docs`
 
