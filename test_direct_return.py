@@ -3,7 +3,7 @@ import asyncio
 import logging
 
 from langchain_core.messages import HumanMessage
-from app import build_agent_graph, extract_repos_from_messages
+from app import build_agent_graph, extract_repo_ids_from_messages, extract_repos_from_messages, load_repos_by_ids
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -44,7 +44,8 @@ async def main():
             content_preview = str(msg.content)[:100] if msg.content else ""
             logger.info(f"   → Response: {content_preview}")
     
-    repos = extract_repos_from_messages(messages)
+    repo_ids = extract_repo_ids_from_messages(messages)
+    repos = load_repos_by_ids(repo_ids) if repo_ids else extract_repos_from_messages(messages)
     logger.info(f"\n{'=' * 80}")
     logger.info(f"RESULT: Found {len(repos)} repositories")
     logger.info(f"{'=' * 80}")
