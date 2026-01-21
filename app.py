@@ -22,6 +22,22 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field, HttpUrl
 from supabase import Client, create_client
+try:
+    from langsmith import traceable as _traceable
+except Exception:  # noqa: BLE001
+    _traceable = None
+
+
+def traceable(*args, **kwargs):
+    if _traceable is None:
+        if args and callable(args[0]) and len(args) == 1 and not kwargs:
+            return args[0]
+
+        def decorator(func):
+            return func
+
+        return decorator
+    return _traceable(*args, **kwargs)
 
 load_dotenv(Path(__file__).with_name(".env"))
 
@@ -65,6 +81,18 @@ REPO_EMBEDDINGS_ON_REFRESH = os.getenv("REPO_EMBEDDINGS_ON_REFRESH", "true").low
 )
 CHUNK_SIZE_CHARS = int(os.getenv("CHUNK_SIZE_CHARS", "1200"))
 CHUNK_OVERLAP_CHARS = int(os.getenv("CHUNK_OVERLAP_CHARS", "200"))
+RERANK_ENABLED = os.getenv("RERANK_ENABLED", "true").lower() in ("1", "true", "yes")
+RERANK_MODEL = os.getenv("OPENAI_RERANK_MODEL", os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
+RERANK_MAX_CANDIDATES = int(os.getenv("RERANK_MAX_CANDIDATES", "8"))
+RERANK_SKIP_SCORE = float(os.getenv("RERANK_SKIP_SCORE", "0.85"))
+RERANK_SKIP_MARGIN = float(os.getenv("RERANK_SKIP_MARGIN", "0.08"))
+MAX_RERANK_TEXT_CHARS = int(os.getenv("MAX_RERANK_TEXT_CHARS", "320"))
+MAX_RERANK_SNIPPET_CHARS = int(os.getenv("MAX_RERANK_SNIPPET_CHARS", "200"))
+RERANK_INCLUDE_SNIPPETS = os.getenv("RERANK_INCLUDE_SNIPPETS", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 SYSTEM_PROMPT = (
     "You are Vasilis Christopoulos speaking in the first person. "
@@ -83,13 +111,22 @@ PLANNER_SYSTEM_PROMPT = (
     "\"should_compare\": bool, \"need_clarification\": bool, \"clarification_question\": string, "
     "\"skip_answer\": bool, \"scope_repo_search_to_cached\": bool}. "
     "Guidance: use_repo_list for listing/showcase requests; use_repo_search for topical repo questions; "
-    "use_profile_search for resume/background/experience; should_compare for ranking/choosing. "
+    "use_profile_search for resume/background/experience or possible projects; should_compare for ranking/choosing. "
+    "Projects may be described only in the CV, so for project-related questions that are not pure listing, "
+    "set both use_repo_search and use_profile_search. "
     "If the query could refer to either repos or CV experience, set both use_repo_search and use_profile_search. "
     "If cached repos are available and the user asks to compare, you can set should_compare true and leave "
-    "retrieval false. If the user refers to the previously listed repos (e.g., 'these projects'), set "
+    "retrieval false. If the user refers to the previously listed repos (e.g., 'from these', 'these projects'), set "
     "scope_repo_search_to_cached true and avoid searching outside cached repos. "
     "If ambiguous, set need_clarification true and provide a short question. "
     "For list-only requests like 'show me your projects', set only use_repo_list true and skip_answer true."
+)
+RERANK_SYSTEM_PROMPT = (
+    "You are a reranking assistant. "
+    "Return a JSON array of candidate ids sorted by relevance to the query. "
+    "Include every candidate id exactly once, unless none are relevant, "
+    "in which case return an empty JSON array. "
+    "Do not include any other text."
 )
 
 MAX_CONTEXT_REPOS = 8
@@ -321,6 +358,7 @@ class AgentResponse(BaseModel):
 
 _supabase_client: Optional[Client] = None
 _embeddings_client: Optional[OpenAIEmbeddings] = None
+_rerank_llm: Optional[ChatOpenAI] = None
 
 
 def get_supabase() -> Client:
@@ -340,6 +378,150 @@ def get_embeddings() -> OpenAIEmbeddings:
             dimensions=EMBEDDING_DIMENSION,
         )
     return _embeddings_client
+
+
+def get_rerank_llm() -> Optional[ChatOpenAI]:
+    if not os.getenv("OPENAI_API_KEY"):
+        return None
+    global _rerank_llm
+    if _rerank_llm is None:
+        _rerank_llm = ChatOpenAI(
+            model=RERANK_MODEL,
+            temperature=0,
+        )
+    return _rerank_llm
+
+
+def parse_rerank_response(raw: Any) -> Optional[List[str]]:
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, str)]
+    if not isinstance(raw, str):
+        return None
+    raw = raw.strip()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, list):
+        return [item for item in parsed if isinstance(item, str)]
+    start = raw.find("[")
+    end = raw.rfind("]")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        parsed = json.loads(raw[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    if isinstance(parsed, list):
+        return [item for item in parsed if isinstance(item, str)]
+    return None
+
+
+@traceable(name="rerank_candidates")
+def rerank_candidates(
+    query: str,
+    candidates: List[Dict[str, Any]],
+    *,
+    limit: int,
+    id_key: str,
+    text_builder,
+) -> List[Dict[str, Any]]:
+    if not RERANK_ENABLED or len(candidates) <= 1:
+        return candidates[:limit]
+    rerank_llm = get_rerank_llm()
+    if rerank_llm is None:
+        return candidates[:limit]
+    candidate_limit = max(limit, RERANK_MAX_CANDIDATES)
+    subset = candidates[:candidate_limit]
+    if len(subset) <= 1:
+        return subset[:limit]
+    top_score = subset[0].get("score")
+    second_score = subset[1].get("score")
+    try:
+        top_value = float(top_score)
+        second_value = float(second_score)
+    except (TypeError, ValueError):
+        top_value = None
+        second_value = None
+    if (
+        top_value is not None
+        and second_value is not None
+        and top_value >= RERANK_SKIP_SCORE
+        and (top_value - second_value) >= RERANK_SKIP_MARGIN
+    ):
+        logger.debug(
+            "Rerank skipped (score=%.3f margin=%.3f)",
+            top_value,
+            top_value - second_value,
+        )
+        return subset[:limit]
+    id_to_candidate: Dict[str, Dict[str, Any]] = {}
+    seen_ids = set()
+    lines: List[str] = []
+    for idx, cand in enumerate(subset, start=1):
+        cand_id = str(cand.get(id_key) or f"candidate_{idx}")
+        if cand_id in seen_ids:
+            cand_id = f"{cand_id}_{idx}"
+        seen_ids.add(cand_id)
+        id_to_candidate[cand_id] = cand
+        text = text_builder(cand)
+        lines.append(f"{cand_id}: {text}")
+    prompt = "Query: {query}\nCandidates:\n{candidates}".format(
+        query=query,
+        candidates="\n".join(lines),
+    )
+    try:
+        response = rerank_llm.invoke(
+            [
+                SystemMessage(content=RERANK_SYSTEM_PROMPT),
+                HumanMessage(content=prompt),
+            ]
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Rerank request failed", exc_info=exc)
+        return subset[:limit]
+    ranking = parse_rerank_response(getattr(response, "content", ""))
+    if ranking is None:
+        return subset[:limit]
+    if not ranking:
+        return []
+    ordered = [id_to_candidate[item] for item in ranking if item in id_to_candidate]
+    if not ordered:
+        return subset[:limit]
+    return ordered[:limit]
+
+
+def build_repo_rerank_text(repo: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    title = repo.get("title")
+    description = repo.get("description")
+    topics = repo.get("topics") or []
+    if title:
+        parts.append(f"Title: {title}")
+    if description:
+        parts.append(f"Description: {description}")
+    if topics:
+        parts.append(f"Topics: {', '.join(str(t) for t in topics)}")
+    if RERANK_INCLUDE_SNIPPETS:
+        snippets = []
+        for snippet in (repo.get("snippets") or [])[:2]:
+            if not isinstance(snippet, str):
+                continue
+            snippets.append(truncate_text(snippet, MAX_RERANK_SNIPPET_CHARS) or "")
+        if snippets:
+            parts.append("Snippets: " + " ".join(s for s in snippets if s))
+    text = " | ".join(parts)
+    return truncate_text(text, MAX_RERANK_TEXT_CHARS) or ""
+
+
+def build_profile_rerank_text(chunk: Dict[str, Any]) -> str:
+    content = chunk.get("content") or ""
+    source = chunk.get("source")
+    if source:
+        text = f"Source: {source} | {content}"
+    else:
+        text = content
+    return truncate_text(text, MAX_RERANK_TEXT_CHARS) or ""
 
 
 def supabase_response_data(response: Any, action: str) -> List[Dict[str, Any]]:
@@ -545,6 +727,7 @@ def refresh_repo_chunks(
         supabase_response_data(insert_response, "insert_repo_chunks")
 
 
+@traceable(name="match_repo_chunks")
 def match_repo_chunks(query: str, limit: int) -> List[Dict[str, Any]]:
     client = get_supabase()
     embeddings = get_embeddings()
@@ -559,6 +742,7 @@ def match_repo_chunks(query: str, limit: int) -> List[Dict[str, Any]]:
     return supabase_response_data(response, "match_repo_chunks")
 
 
+@traceable(name="match_profile_chunks")
 def match_profile_chunks(query: str, limit: int) -> List[Dict[str, Any]]:
     client = get_supabase()
     embeddings = get_embeddings()
@@ -672,8 +856,12 @@ def fetch_showcase_repos(limit: int = DEFAULT_LIMIT) -> Dict[str, Any]:
 def search_showcase_repos(query: str, limit: int = 5) -> List[Dict[str, Any]]:
     """Search cached repo content for targeted questions."""
     limit = max(1, min(limit, 10))
+    candidate_limit = limit
+    if RERANK_ENABLED:
+        candidate_limit = max(limit, RERANK_MAX_CANDIDATES)
+    candidate_limit = max(1, min(candidate_limit, 10))
     try:
-        matches = match_repo_chunks(query, limit)
+        matches = match_repo_chunks(query, candidate_limit)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Repo chunk match failed", exc_info=exc)
         matches = []
@@ -705,6 +893,13 @@ def search_showcase_repos(query: str, limit: int = 5) -> List[Dict[str, Any]]:
             }
             for row in fallback_rows
         ]
+        results = rerank_candidates(
+            query,
+            results,
+            limit=limit,
+            id_key="repo_id",
+            text_builder=build_repo_rerank_text,
+        )
         logger.info(
             "search_showcase_repos: query=%r hits=%d fallback=true",
             query,
@@ -747,6 +942,13 @@ def search_showcase_repos(query: str, limit: int = 5) -> List[Dict[str, Any]]:
                 "score": hit.get("score"),
             }
         )
+    results = rerank_candidates(
+        query,
+        results,
+        limit=limit,
+        id_key="repo_id",
+        text_builder=build_repo_rerank_text,
+    )
     logger.info(
         "search_showcase_repos: query=%r hits=%d fallback=false",
         query,
@@ -759,7 +961,11 @@ def search_showcase_repos(query: str, limit: int = 5) -> List[Dict[str, Any]]:
 def retrieve_profile_context(query: str, limit: int = RAG_TOP_K) -> List[Dict[str, Any]]:
     """Retrieve profile context chunks for answering resume/background questions."""
     limit = max(1, min(limit, 10))
-    matches = match_profile_chunks(query, limit)
+    candidate_limit = limit
+    if RERANK_ENABLED:
+        candidate_limit = max(limit, RERANK_MAX_CANDIDATES)
+    candidate_limit = max(1, min(candidate_limit, 10))
+    matches = match_profile_chunks(query, candidate_limit)
     results = []
     for match in matches:
         results.append(
@@ -769,6 +975,13 @@ def retrieve_profile_context(query: str, limit: int = RAG_TOP_K) -> List[Dict[st
                 "score": match.get("score"),
             }
         )
+    results = rerank_candidates(
+        query,
+        results,
+        limit=limit,
+        id_key="source",
+        text_builder=build_profile_rerank_text,
+    )
     logger.info("retrieve_profile_context: query=%r hits=%d", query, len(results))
     return results
 
@@ -789,6 +1002,7 @@ def build_agent_graph():
         temperature=0,
     )
 
+    @traceable(name="build_plan")
     async def build_plan(state: AgentState) -> Dict[str, Any]:
         messages = state.get("messages", [])
         last_user_text = get_last_user_text(messages)
@@ -810,6 +1024,7 @@ def build_agent_graph():
         plan = parse_plan(getattr(response, "content", ""))
         return {"plan": plan}
 
+    @traceable(name="execute_plan")
     def execute_plan(state: AgentState) -> Dict[str, Any]:
         plan = state.get("plan") or DEFAULT_PLAN
         messages = state.get("messages", [])
@@ -889,6 +1104,7 @@ def build_agent_graph():
             update["profile_context"] = trim_profile_context(profile_results)
         return update
 
+    @traceable(name="answer")
     async def answer(state: AgentState) -> Dict[str, Any]:
         plan = state.get("plan") or DEFAULT_PLAN
         if plan.get("need_clarification"):
