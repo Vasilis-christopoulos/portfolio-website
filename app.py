@@ -117,7 +117,7 @@ PLANNER_SYSTEM_PROMPT = (
     "Return JSON only with fields: "
     "{\"use_repo_list\": bool, \"use_repo_search\": bool, \"use_profile_search\": bool, "
     "\"should_compare\": bool, \"need_clarification\": bool, \"clarification_question\": string, "
-    "\"skip_answer\": bool, \"scope_repo_search_to_cached\": bool}. "
+    "\"skip_answer\": bool, \"scope_repo_search_to_cached\": bool, \"contact_intent\": bool}. "
     "Guidance: use_repo_list for listing/showcase requests; use_repo_search for topical repo questions; "
     "use_profile_search for resume/background/experience or possible projects; should_compare for ranking/choosing. "
     "Projects may be described only in the CV, so for project-related questions that are not pure listing, "
@@ -127,7 +127,8 @@ PLANNER_SYSTEM_PROMPT = (
     "retrieval false. If the user refers to the previously listed repos (e.g., 'from these', 'these projects'), set "
     "scope_repo_search_to_cached true and avoid searching outside cached repos. "
     "If ambiguous, set need_clarification true and provide a short question. "
-    "For list-only requests like 'show me your projects', set only use_repo_list true and skip_answer true."
+    "For list-only requests like 'show me your projects', set only use_repo_list true and skip_answer true. "
+    "If the user wants to contact/reach out/email/hire/schedule, set contact_intent true and keep retrieval false."
 )
 RERANK_SYSTEM_PROMPT = (
     "You are a reranking assistant. "
@@ -152,6 +153,7 @@ DEFAULT_PLAN = {
     "clarification_question": "",
     "skip_answer": False,
     "scope_repo_search_to_cached": False,
+    "contact_intent": False,
 }
 
 def coerce_bool(value: Any) -> bool:
@@ -186,6 +188,7 @@ def parse_plan(raw: Any) -> Dict[str, Any]:
         "need_clarification",
         "skip_answer",
         "scope_repo_search_to_cached",
+        "contact_intent",
     ):
         plan[key] = coerce_bool(data.get(key))
     clarification = data.get("clarification_question")
@@ -214,6 +217,8 @@ def get_last_user_text(messages: List[Any]) -> str:
 
 def should_render_repos(plan: Optional[Dict[str, Any]]) -> bool:
     if not plan:
+        return False
+    if plan.get("contact_intent"):
         return False
     if plan.get("need_clarification"):
         return False
@@ -408,6 +413,7 @@ class AgentResponse(BaseModel):
     source: str
     raw_output: Optional[Any] = None
     render_repos: bool = False
+    contact_intent: bool = False
 
 
 class ContactRequest(BaseModel):
@@ -1101,6 +1107,13 @@ def build_agent_graph():
                 "clarification_question": plan.get("clarification_question")
                 or "Could you clarify what you want to know?"
             }
+        if plan.get("contact_intent"):
+            return {
+                "repos": [],
+                "repo_summaries": [],
+                "repo_search_context": [],
+                "profile_context": [],
+            }
         update: Dict[str, Any] = {}
         repos_from_list: List[Dict[str, Any]] = []
         repo_search_results: List[Dict[str, Any]] = []
@@ -1172,6 +1185,12 @@ def build_agent_graph():
     @traceable(name="answer")
     async def answer(state: AgentState) -> Dict[str, Any]:
         plan = state.get("plan") or DEFAULT_PLAN
+        if plan.get("contact_intent"):
+            message = (
+                "Sure — share your name, email, and message in the form below and "
+                "I’ll get back to you."
+            )
+            return {"messages": [AIMessage(content=message)]}
         if plan.get("need_clarification"):
             question = state.get("clarification_question") or "Could you clarify what you want to know?"
             return {"messages": [AIMessage(content=question)]}
@@ -1213,6 +1232,8 @@ def build_agent_graph():
     def should_skip_answer(state: AgentState) -> bool:
         plan = state.get("plan") or DEFAULT_PLAN
         if plan.get("need_clarification"):
+            return False
+        if plan.get("contact_intent"):
             return False
         if plan.get("skip_answer"):
             return True
@@ -1419,6 +1440,7 @@ async def agent_showcase(request: AgentRequest) -> AgentResponse:
                 source="agent",
                 raw_output=final_text,
                 render_repos=render_repos,
+                contact_intent=bool(plan.get("contact_intent")),
             )
         except HTTPException:
             raise
