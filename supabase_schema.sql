@@ -33,6 +33,14 @@ create table if not exists portfolio_profile_chunks (
   updated_at timestamptz default now()
 );
 
+create table if not exists portfolio_contact_messages (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  email text not null,
+  message text not null,
+  created_at timestamptz default now()
+);
+
 create or replace function match_repo_chunks(
   query_embedding vector(1536),
   match_count int

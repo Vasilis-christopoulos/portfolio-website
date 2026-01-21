@@ -9,6 +9,10 @@ Personal AI powered portfolio website. Chatbot interface tailored to recruiters 
    - `OPENAI_API_KEY`
    - `GITHUB_USERNAME`
    - `GITHUB_TOKEN` (optional)
+   - `SUPABASE_CONTACT_TABLE` (optional, default `portfolio_contact_messages`)
+   - `RESEND_API_KEY` (for contact email)
+   - `RESEND_FROM_EMAIL` (verified sender)
+   - `RESEND_TO_EMAIL` (destination inbox)
    - `EMBEDDING_MODEL` (default `text-embedding-3-small`)
    - `EMBEDDING_DIMENSION` (default `1536`, must match schema)
    - `REPO_CACHE_TTL_SECONDS` (default `1800`)

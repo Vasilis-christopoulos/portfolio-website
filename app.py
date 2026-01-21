@@ -20,7 +20,7 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, EmailStr, Field, HttpUrl
 from supabase import Client, create_client
 try:
     from langsmith import traceable as _traceable
@@ -69,6 +69,14 @@ SUPABASE_REPO_MATCH_RPC = os.getenv("SUPABASE_REPO_MATCH_RPC", "match_repo_chunk
 SUPABASE_PROFILE_MATCH_RPC = os.getenv(
     "SUPABASE_PROFILE_MATCH_RPC", "match_profile_chunks"
 )
+SUPABASE_CONTACT_TABLE = os.getenv(
+    "SUPABASE_CONTACT_TABLE",
+    "portfolio_contact_messages",
+)
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL")
+RESEND_TO_EMAIL = os.getenv("RESEND_TO_EMAIL")
+RESEND_API_URL = "https://api.resend.com/emails"
 
 REPO_CACHE_TTL_SECONDS = int(os.getenv("REPO_CACHE_TTL_SECONDS", "1800"))
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
@@ -230,6 +238,52 @@ def truncate_text(value: Optional[str], limit: int) -> Optional[str]:
     return cleaned[:limit].rstrip()
 
 
+def normalize_contact_field(value: str, field_name: str) -> str:
+    cleaned = value.strip()
+    if not cleaned:
+        raise HTTPException(status_code=422, detail=f"{field_name} is required.")
+    return cleaned
+
+
+def send_contact_email(name: str, email: str, message: str) -> None:
+    if not RESEND_API_KEY or not RESEND_FROM_EMAIL or not RESEND_TO_EMAIL:
+        raise RuntimeError(
+            "Resend is not configured. Set RESEND_API_KEY, RESEND_FROM_EMAIL, RESEND_TO_EMAIL."
+        )
+    subject = f"New contact from {name}"
+    body = "\n".join(
+        [
+            "You've received a new message from your portfolio site.",
+            "",
+            f"Name: {name}",
+            f"Email: {email}",
+            "",
+            "Message:",
+            message,
+        ]
+    )
+    payload = {
+        "from": RESEND_FROM_EMAIL,
+        "to": [RESEND_TO_EMAIL],
+        "subject": subject,
+        "text": body,
+        "reply_to": email,
+    }
+    headers = {
+        "Authorization": f"Bearer {RESEND_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    with httpx.Client(timeout=10.0) as client:
+        response = client.post(RESEND_API_URL, json=payload, headers=headers)
+    if response.status_code >= 400:
+        logger.error(
+            "Resend failed: status=%s body=%s",
+            response.status_code,
+            response.text,
+        )
+        raise RuntimeError("Resend email send failed.")
+
+
 def build_repo_summaries(repos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     summaries: List[Dict[str, Any]] = []
     for repo in repos[:MAX_CONTEXT_REPOS]:
@@ -354,6 +408,17 @@ class AgentResponse(BaseModel):
     source: str
     raw_output: Optional[Any] = None
     render_repos: bool = False
+
+
+class ContactRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    email: EmailStr
+    message: str = Field(..., min_length=1, max_length=2000)
+
+
+class ContactResponse(BaseModel):
+    id: Optional[str] = None
+    status: str = "ok"
 
 
 _supabase_client: Optional[Client] = None
@@ -1302,6 +1367,26 @@ app.add_middleware(
 @app.get("/health")
 async def health() -> Dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/contact", response_model=ContactResponse, status_code=201)
+async def contact(request: ContactRequest) -> ContactResponse:
+    name = normalize_contact_field(request.name, "name")
+    email = normalize_contact_field(str(request.email), "email")
+    message = normalize_contact_field(request.message, "message")
+    payload = {"name": name, "email": email, "message": message}
+    try:
+        client = get_supabase()
+        response = client.table(SUPABASE_CONTACT_TABLE).insert(payload).execute()
+        rows = supabase_response_data(response, "insert_contact_message")
+        contact_id = rows[0].get("id") if rows else None
+        send_contact_email(name, email, message)
+        return ContactResponse(id=contact_id, status="ok")
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Contact request failed")
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.post("/agent/showcase", response_model=AgentResponse)
