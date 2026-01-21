@@ -79,12 +79,14 @@ PLANNER_SYSTEM_PROMPT = (
     "Return JSON only with fields: "
     "{\"use_repo_list\": bool, \"use_repo_search\": bool, \"use_profile_search\": bool, "
     "\"should_compare\": bool, \"need_clarification\": bool, \"clarification_question\": string, "
-    "\"skip_answer\": bool}. "
+    "\"skip_answer\": bool, \"scope_repo_search_to_cached\": bool}. "
     "Guidance: use_repo_list for listing/showcase requests; use_repo_search for topical repo questions; "
     "use_profile_search for resume/background/experience; should_compare for ranking/choosing. "
     "If the query could refer to either repos or CV experience, set both use_repo_search and use_profile_search. "
     "If cached repos are available and the user asks to compare, you can set should_compare true and leave "
-    "retrieval false. If ambiguous, set need_clarification true and provide a short question. "
+    "retrieval false. If the user refers to the previously listed repos (e.g., 'these projects'), set "
+    "scope_repo_search_to_cached true and avoid searching outside cached repos. "
+    "If ambiguous, set need_clarification true and provide a short question. "
     "For list-only requests like 'show me your projects', set only use_repo_list true and skip_answer true."
 )
 
@@ -102,6 +104,7 @@ DEFAULT_PLAN = {
     "need_clarification": False,
     "clarification_question": "",
     "skip_answer": False,
+    "scope_repo_search_to_cached": False,
 }
 
 def coerce_bool(value: Any) -> bool:
@@ -135,6 +138,7 @@ def parse_plan(raw: Any) -> Dict[str, Any]:
         "should_compare",
         "need_clarification",
         "skip_answer",
+        "scope_repo_search_to_cached",
     ):
         plan[key] = coerce_bool(data.get(key))
     clarification = data.get("clarification_question")
@@ -782,6 +786,7 @@ def build_agent_graph():
         messages = state.get("messages", [])
         last_user_text = get_last_user_text(messages)
         request_limit = state.get("request_limit") or DEFAULT_LIMIT
+        cached_repo_ids = state.get("last_repo_ids") or []
         if plan.get("need_clarification"):
             return {
                 "clarification_question": plan.get("clarification_question")
@@ -804,6 +809,12 @@ def build_agent_graph():
                     "limit": MAX_REPO_SEARCH_RESULTS,
                 }
             )
+            if plan.get("scope_repo_search_to_cached") and cached_repo_ids:
+                repo_search_results = [
+                    row
+                    for row in repo_search_results
+                    if row.get("repo_id") in cached_repo_ids
+                ]
         if plan.get("use_profile_search") and last_user_text:
             profile_results = retrieve_profile_context.invoke(
                 {
@@ -830,15 +841,19 @@ def build_agent_graph():
             update["repos"] = repos_for_response
             update["repo_summaries"] = build_repo_summaries(repos_for_response)
             update["last_repo_summaries"] = update["repo_summaries"]
-            seen_ids = set()
-            ordered_ids: List[str] = []
-            for repo in repos_for_response:
-                repo_id = repo.get("repo_id")
-                if repo_id and repo_id not in seen_ids:
-                    seen_ids.add(repo_id)
-                    ordered_ids.append(repo_id)
-            if ordered_ids:
-                update["last_repo_ids"] = ordered_ids
+            if plan.get("use_repo_list") or (
+                plan.get("use_repo_search")
+                and not plan.get("scope_repo_search_to_cached")
+            ):
+                seen_ids = set()
+                ordered_ids: List[str] = []
+                for repo in repos_for_response:
+                    repo_id = repo.get("repo_id")
+                    if repo_id and repo_id not in seen_ids:
+                        seen_ids.add(repo_id)
+                        ordered_ids.append(repo_id)
+                if ordered_ids:
+                    update["last_repo_ids"] = ordered_ids
         if repo_search_results:
             update["repo_search_context"] = trim_repo_search_results(repo_search_results)
         if profile_results:
