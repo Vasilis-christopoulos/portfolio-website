@@ -10,6 +10,7 @@ Personal AI powered portfolio website. Chatbot interface tailored to recruiters 
    - `GITHUB_USERNAME`
    - `GITHUB_TOKEN` (optional)
    - `SUPABASE_CONTACT_TABLE` (optional, default `portfolio_contact_messages`)
+   - `CV_FILE_PATH` (optional, default `docs/Vasileios_Christopoulos_GenAI copy.pdf`)
    - `RESEND_API_KEY` (for contact email)
    - `RESEND_FROM_EMAIL` (verified sender)
    - `RESEND_TO_EMAIL` (destination inbox)

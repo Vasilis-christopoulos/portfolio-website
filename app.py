@@ -13,6 +13,7 @@ import httpx
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
@@ -73,6 +74,10 @@ SUPABASE_CONTACT_TABLE = os.getenv(
     "SUPABASE_CONTACT_TABLE",
     "portfolio_contact_messages",
 )
+CV_FILE_PATH = os.getenv(
+    "CV_FILE_PATH",
+    "docs/Vasileios_Christopoulos_GenAI copy.pdf",
+)
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL")
 RESEND_TO_EMAIL = os.getenv("RESEND_TO_EMAIL")
@@ -117,7 +122,8 @@ PLANNER_SYSTEM_PROMPT = (
     "Return JSON only with fields: "
     "{\"use_repo_list\": bool, \"use_repo_search\": bool, \"use_profile_search\": bool, "
     "\"should_compare\": bool, \"need_clarification\": bool, \"clarification_question\": string, "
-    "\"skip_answer\": bool, \"scope_repo_search_to_cached\": bool, \"contact_intent\": bool}. "
+    "\"skip_answer\": bool, \"scope_repo_search_to_cached\": bool, \"contact_intent\": bool, "
+    "\"cv_intent\": bool}. "
     "Guidance: use_repo_list for listing/showcase requests; use_repo_search for topical repo questions; "
     "use_profile_search for resume/background/experience or possible projects; should_compare for ranking/choosing. "
     "Projects may be described only in the CV, so for project-related questions that are not pure listing, "
@@ -128,7 +134,8 @@ PLANNER_SYSTEM_PROMPT = (
     "scope_repo_search_to_cached true and avoid searching outside cached repos. "
     "If ambiguous, set need_clarification true and provide a short question. "
     "For list-only requests like 'show me your projects', set only use_repo_list true and skip_answer true. "
-    "If the user wants to contact/reach out/email/hire/schedule, set contact_intent true and keep retrieval false."
+    "If the user wants to contact/reach out/email/hire/schedule, set contact_intent true and keep retrieval false. "
+    "If the user asks for a resume/CV download, set cv_intent true and keep retrieval false."
 )
 RERANK_SYSTEM_PROMPT = (
     "You are a reranking assistant. "
@@ -154,6 +161,7 @@ DEFAULT_PLAN = {
     "skip_answer": False,
     "scope_repo_search_to_cached": False,
     "contact_intent": False,
+    "cv_intent": False,
 }
 
 def coerce_bool(value: Any) -> bool:
@@ -189,6 +197,7 @@ def parse_plan(raw: Any) -> Dict[str, Any]:
         "skip_answer",
         "scope_repo_search_to_cached",
         "contact_intent",
+        "cv_intent",
     ):
         plan[key] = coerce_bool(data.get(key))
     clarification = data.get("clarification_question")
@@ -220,6 +229,8 @@ def should_render_repos(plan: Optional[Dict[str, Any]]) -> bool:
         return False
     if plan.get("contact_intent"):
         return False
+    if plan.get("cv_intent"):
+        return False
     if plan.get("need_clarification"):
         return False
     if plan.get("skip_answer"):
@@ -248,6 +259,13 @@ def normalize_contact_field(value: str, field_name: str) -> str:
     if not cleaned:
         raise HTTPException(status_code=422, detail=f"{field_name} is required.")
     return cleaned
+
+
+def resolve_cv_path() -> Path:
+    path = Path(CV_FILE_PATH)
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parent / path
+    return path
 
 
 def send_contact_email(name: str, email: str, message: str) -> None:
@@ -414,6 +432,8 @@ class AgentResponse(BaseModel):
     raw_output: Optional[Any] = None
     render_repos: bool = False
     contact_intent: bool = False
+    cv_intent: bool = False
+    cv_url: Optional[str] = None
 
 
 class ContactRequest(BaseModel):
@@ -1107,7 +1127,7 @@ def build_agent_graph():
                 "clarification_question": plan.get("clarification_question")
                 or "Could you clarify what you want to know?"
             }
-        if plan.get("contact_intent"):
+        if plan.get("contact_intent") or plan.get("cv_intent"):
             return {
                 "repos": [],
                 "repo_summaries": [],
@@ -1191,6 +1211,9 @@ def build_agent_graph():
                 "I’ll get back to you."
             )
             return {"messages": [AIMessage(content=message)]}
+        if plan.get("cv_intent"):
+            message = "Sure — you can download my CV below."
+            return {"messages": [AIMessage(content=message)]}
         if plan.get("need_clarification"):
             question = state.get("clarification_question") or "Could you clarify what you want to know?"
             return {"messages": [AIMessage(content=question)]}
@@ -1234,6 +1257,8 @@ def build_agent_graph():
         if plan.get("need_clarification"):
             return False
         if plan.get("contact_intent"):
+            return False
+        if plan.get("cv_intent"):
             return False
         if plan.get("skip_answer"):
             return True
@@ -1390,6 +1415,18 @@ async def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/cv")
+async def download_cv() -> FileResponse:
+    cv_path = resolve_cv_path()
+    if not cv_path.exists():
+        raise HTTPException(status_code=404, detail="CV file not found.")
+    return FileResponse(
+        cv_path,
+        media_type="application/pdf",
+        filename=cv_path.name,
+    )
+
+
 @app.post("/contact", response_model=ContactResponse, status_code=201)
 async def contact(request: ContactRequest) -> ContactResponse:
     name = normalize_contact_field(request.name, "name")
@@ -1435,12 +1472,15 @@ async def agent_showcase(request: AgentRequest) -> AgentResponse:
                     break
             plan = result.get("plan") or DEFAULT_PLAN
             render_repos = should_render_repos(plan)
+            cv_intent = bool(plan.get("cv_intent"))
             return AgentResponse(
                 repos=[ShowcaseRepo(**repo) for repo in repos] if repos else [],
                 source="agent",
                 raw_output=final_text,
                 render_repos=render_repos,
                 contact_intent=bool(plan.get("contact_intent")),
+                cv_intent=cv_intent,
+                cv_url="/cv" if cv_intent else None,
             )
         except HTTPException:
             raise
