@@ -146,6 +146,15 @@ def parse_plan(raw: Any) -> Dict[str, Any]:
         plan["clarification_question"] = clarification.strip()
     if plan["need_clarification"] and not plan["clarification_question"]:
         plan["clarification_question"] = "Could you clarify what you want to know?"
+    if plan["skip_answer"]:
+        if (
+            not plan.get("use_repo_list")
+            or plan.get("use_repo_search")
+            or plan.get("use_profile_search")
+            or plan.get("should_compare")
+            or plan.get("need_clarification")
+        ):
+            plan["skip_answer"] = False
     return plan
 
 
@@ -154,6 +163,23 @@ def get_last_user_text(messages: List[Any]) -> str:
         if isinstance(message, HumanMessage):
             return message.content
     return ""
+
+
+def should_render_repos(plan: Optional[Dict[str, Any]]) -> bool:
+    if not plan:
+        return False
+    if plan.get("need_clarification"):
+        return False
+    if plan.get("skip_answer"):
+        return True
+    if (
+        plan.get("use_repo_search")
+        and not plan.get("use_profile_search")
+        and not plan.get("should_compare")
+        and not plan.get("scope_repo_search_to_cached")
+    ):
+        return True
+    return False
 
 
 def truncate_text(value: Optional[str], limit: int) -> Optional[str]:
@@ -288,6 +314,7 @@ class AgentResponse(BaseModel):
     repos: List[ShowcaseRepo]
     source: str
     raw_output: Optional[Any] = None
+    render_repos: bool = False
 
 
 _supabase_client: Optional[Client] = None
@@ -1082,10 +1109,13 @@ async def agent_showcase(request: AgentRequest) -> AgentResponse:
                 if isinstance(message, AIMessage):
                     final_text = getattr(message, "content", "")
                     break
+            plan = result.get("plan") or DEFAULT_PLAN
+            render_repos = should_render_repos(plan)
             return AgentResponse(
                 repos=[ShowcaseRepo(**repo) for repo in repos] if repos else [],
                 source="agent",
                 raw_output=final_text,
+                render_repos=render_repos,
             )
         except HTTPException:
             raise
@@ -1098,6 +1128,7 @@ async def agent_showcase(request: AgentRequest) -> AgentResponse:
         return AgentResponse(
             repos=[ShowcaseRepo(**repo) for repo in repos],
             source="tool",
+            render_repos=True,
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=str(exc)) from exc
