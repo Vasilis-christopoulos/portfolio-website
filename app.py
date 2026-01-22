@@ -1,5 +1,6 @@
 """FastAPI app exposing a LangGraph-powered agent with a GitHub showcase tool."""
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -364,20 +365,20 @@ def log_event(
     return rows[0].get("id") if rows else None
 
 
-def safe_log_user_message(message: str, session_id: Optional[str]) -> None:
+async def safe_log_user_message(message: str, session_id: Optional[str]) -> None:
     try:
-        log_user_message(message, session_id)
+        await asyncio.to_thread(log_user_message, message, session_id)
     except Exception as exc:  # noqa: BLE001
         logger.warning("User message log failed", exc_info=exc)
 
 
-def safe_log_event(
+async def safe_log_event(
     event_type: str,
     session_id: Optional[str],
     metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
     try:
-        log_event(event_type, session_id, metadata)
+        await asyncio.to_thread(log_event, event_type, session_id, metadata)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Event log failed", exc_info=exc)
 
@@ -1544,24 +1545,22 @@ async def contact(request: ContactRequest) -> ContactResponse:
 @app.post("/analytics/event", response_model=AnalyticsEventResponse, status_code=201)
 async def analytics_event(request: AnalyticsEventRequest) -> AnalyticsEventResponse:
     session_id = request.session_id.strip() if request.session_id else None
-    try:
-        event_id = log_event(request.event_type, session_id, request.metadata)
-        return AnalyticsEventResponse(id=event_id, status="ok")
-    except HTTPException:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Analytics event insert failed")
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    asyncio.create_task(
+        safe_log_event(request.event_type, session_id, request.metadata)
+    )
+    return AnalyticsEventResponse(status="ok")
 
 
 @app.post("/agent/showcase", response_model=AgentResponse)
 async def agent_showcase(request: AgentRequest) -> AgentResponse:
     session_id = request.session_id.strip() if request.session_id else None
-    safe_log_user_message(request.query, session_id)
-    safe_log_event(
-        "agent_query",
-        session_id,
-        {"use_agent": request.use_agent, "limit": request.limit},
+    asyncio.create_task(safe_log_user_message(request.query, session_id))
+    asyncio.create_task(
+        safe_log_event(
+            "agent_query",
+            session_id,
+            {"use_agent": request.use_agent, "limit": request.limit},
+        )
     )
     if request.use_agent:
         try:
