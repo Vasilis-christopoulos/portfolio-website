@@ -74,6 +74,14 @@ SUPABASE_CONTACT_TABLE = os.getenv(
     "SUPABASE_CONTACT_TABLE",
     "portfolio_contact_messages",
 )
+SUPABASE_USER_MESSAGES_TABLE = os.getenv(
+    "SUPABASE_USER_MESSAGES_TABLE",
+    "portfolio_user_messages",
+)
+SUPABASE_EVENTS_TABLE = os.getenv(
+    "SUPABASE_EVENTS_TABLE",
+    "portfolio_events",
+)
 CV_FILE_PATH = os.getenv(
     "CV_FILE_PATH",
     "docs/Vasileios_Christopoulos_GenAI copy.pdf",
@@ -324,6 +332,56 @@ def send_contact_email(name: str, email: str, message: str) -> None:
         raise RuntimeError("Resend email send failed.")
 
 
+def log_user_message(message: str, session_id: Optional[str]) -> Optional[str]:
+    cleaned = message.strip()
+    if not cleaned:
+        return None
+    payload: Dict[str, Any] = {"message": cleaned}
+    if session_id:
+        payload["session_id"] = session_id
+    client = get_supabase()
+    response = client.table(SUPABASE_USER_MESSAGES_TABLE).insert(payload).execute()
+    rows = supabase_response_data(response, "insert_user_message")
+    return rows[0].get("id") if rows else None
+
+
+def log_event(
+    event_type: str,
+    session_id: Optional[str],
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    cleaned = event_type.strip()
+    if not cleaned:
+        return None
+    payload: Dict[str, Any] = {"event_type": cleaned}
+    if session_id:
+        payload["session_id"] = session_id
+    if metadata is not None:
+        payload["metadata"] = metadata
+    client = get_supabase()
+    response = client.table(SUPABASE_EVENTS_TABLE).insert(payload).execute()
+    rows = supabase_response_data(response, "insert_event")
+    return rows[0].get("id") if rows else None
+
+
+def safe_log_user_message(message: str, session_id: Optional[str]) -> None:
+    try:
+        log_user_message(message, session_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("User message log failed", exc_info=exc)
+
+
+def safe_log_event(
+    event_type: str,
+    session_id: Optional[str],
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    try:
+        log_event(event_type, session_id, metadata)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Event log failed", exc_info=exc)
+
+
 def build_repo_summaries(repos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     summaries: List[Dict[str, Any]] = []
     for repo in repos[:MAX_CONTEXT_REPOS]:
@@ -463,6 +521,17 @@ class ContactRequest(BaseModel):
 
 
 class ContactResponse(BaseModel):
+    id: Optional[str] = None
+    status: str = "ok"
+
+
+class AnalyticsEventRequest(BaseModel):
+    session_id: Optional[str] = None
+    event_type: str = Field(..., min_length=1, max_length=120)
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class AnalyticsEventResponse(BaseModel):
     id: Optional[str] = None
     status: str = "ok"
 
@@ -1472,13 +1541,33 @@ async def contact(request: ContactRequest) -> ContactResponse:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+@app.post("/analytics/event", response_model=AnalyticsEventResponse, status_code=201)
+async def analytics_event(request: AnalyticsEventRequest) -> AnalyticsEventResponse:
+    session_id = request.session_id.strip() if request.session_id else None
+    try:
+        event_id = log_event(request.event_type, session_id, request.metadata)
+        return AnalyticsEventResponse(id=event_id, status="ok")
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Analytics event insert failed")
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @app.post("/agent/showcase", response_model=AgentResponse)
 async def agent_showcase(request: AgentRequest) -> AgentResponse:
+    session_id = request.session_id.strip() if request.session_id else None
+    safe_log_user_message(request.query, session_id)
+    safe_log_event(
+        "agent_query",
+        session_id,
+        {"use_agent": request.use_agent, "limit": request.limit},
+    )
     if request.use_agent:
         try:
             agent = get_agent_graph()
             logger.info("Agent invocation", extra={"limit": request.limit, "query": request.query})
-            thread_id = request.session_id or "default"
+            thread_id = session_id or "default"
             result = await agent.ainvoke(
                 {
                     "messages": [HumanMessage(content=request.query)],

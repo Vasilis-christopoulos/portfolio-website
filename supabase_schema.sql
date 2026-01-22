@@ -41,6 +41,21 @@ create table if not exists portfolio_contact_messages (
   created_at timestamptz default now()
 );
 
+create table if not exists portfolio_user_messages (
+  id uuid primary key default gen_random_uuid(),
+  session_id text,
+  message text not null,
+  created_at timestamptz default now()
+);
+
+create table if not exists portfolio_events (
+  id uuid primary key default gen_random_uuid(),
+  session_id text,
+  event_type text not null,
+  metadata jsonb,
+  created_at timestamptz default now()
+);
+
 create or replace function match_repo_chunks(
   query_embedding vector(1536),
   match_count int
