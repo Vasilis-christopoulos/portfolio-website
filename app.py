@@ -7,7 +7,7 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Annotated, Any, Dict, List, Optional, TypedDict
+from typing import Annotated, Any, Dict, List, Optional, Tuple, TypedDict
 import math
 
 import httpx
@@ -117,6 +117,17 @@ RERANK_INCLUDE_SNIPPETS = os.getenv("RERANK_INCLUDE_SNIPPETS", "false").lower() 
     "true",
     "yes",
 )
+PROFILE_QUERY_REWRITE_ENABLED = os.getenv(
+    "PROFILE_QUERY_REWRITE_ENABLED", "true"
+).lower() in ("1", "true", "yes")
+PROFILE_QUERY_REWRITE_MODEL = os.getenv(
+    "OPENAI_PROFILE_REWRITE_MODEL", os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+)
+PROFILE_BROAD_TOP_K = int(os.getenv("PROFILE_BROAD_TOP_K", "8"))
+PROFILE_BROAD_CANDIDATE_LIMIT = int(os.getenv("PROFILE_BROAD_CANDIDATE_LIMIT", "12"))
+PROFILE_CONTEXT_MAX_ITEMS = int(
+    os.getenv("PROFILE_CONTEXT_MAX_ITEMS", str(max(RAG_TOP_K, PROFILE_BROAD_TOP_K)))
+)
 
 SYSTEM_PROMPT = (
     "You are Vasilis Christopoulos speaking in the first person. "
@@ -154,6 +165,15 @@ PLANNER_SYSTEM_PROMPT = (
     "Questions about hiring decisions or fit (e.g., 'why should I hire you', 'why are you a good fit') "
     "are not contact_intent. "
     "If the user asks for a resume/CV download, set cv_intent true and keep retrieval false."
+)
+PROFILE_QUERY_REWRITE_SYSTEM_PROMPT = (
+    "You are a query refinement assistant for resume/profile retrieval. "
+    "Rewrite the user's question into a short, keyword-focused search query that improves recall. "
+    "If the question is broad (hire/fit/overview/companies/work history), expand into a resume-wide query covering "
+    "work experience, employers, roles, internships, projects, education, skills, leadership, awards. "
+    "If the question asks about companies or work history, include owning/founding/self-employed/entrepreneurship. "
+    "Return JSON only: {\"query\": string, \"is_broad\": bool}. "
+    "Use the original wording when the question is already specific."
 )
 RERANK_SYSTEM_PROMPT = (
     "You are a reranking assistant. "
@@ -482,7 +502,8 @@ def trim_repo_search_results(results: List[Dict[str, Any]]) -> List[Dict[str, An
 
 def trim_profile_context(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     trimmed: List[Dict[str, Any]] = []
-    for row in results[:RAG_TOP_K]:
+    max_items = max(1, PROFILE_CONTEXT_MAX_ITEMS)
+    for row in results[:max_items]:
         trimmed.append(
             {
                 "content": truncate_text_edges(
@@ -573,6 +594,7 @@ class AnalyticsEventResponse(BaseModel):
 _supabase_client: Optional[Client] = None
 _embeddings_client: Optional[OpenAIEmbeddings] = None
 _rerank_llm: Optional[ChatOpenAI] = None
+_profile_rewrite_llm: Optional[ChatOpenAI] = None
 
 
 def get_supabase() -> Client:
@@ -606,6 +628,18 @@ def get_rerank_llm() -> Optional[ChatOpenAI]:
     return _rerank_llm
 
 
+def get_profile_rewrite_llm() -> Optional[ChatOpenAI]:
+    if not os.getenv("OPENAI_API_KEY"):
+        return None
+    global _profile_rewrite_llm
+    if _profile_rewrite_llm is None:
+        _profile_rewrite_llm = ChatOpenAI(
+            model=PROFILE_QUERY_REWRITE_MODEL,
+            temperature=0,
+        )
+    return _profile_rewrite_llm
+
+
 def parse_rerank_response(raw: Any) -> Optional[List[str]]:
     if isinstance(raw, list):
         return [item for item in raw if isinstance(item, str)]
@@ -629,6 +663,63 @@ def parse_rerank_response(raw: Any) -> Optional[List[str]]:
     if isinstance(parsed, list):
         return [item for item in parsed if isinstance(item, str)]
     return None
+
+
+def parse_profile_rewrite_response(raw: Any, original: str) -> Tuple[str, bool]:
+    query = original
+    is_broad = False
+    data: Optional[Dict[str, Any]] = None
+    if isinstance(raw, dict):
+        data = raw
+    elif isinstance(raw, str):
+        raw = raw.strip()
+        if raw:
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                data = parsed
+            else:
+                start = raw.find("{")
+                end = raw.rfind("}")
+                if start != -1 and end != -1 and end > start:
+                    try:
+                        parsed = json.loads(raw[start : end + 1])
+                    except json.JSONDecodeError:
+                        parsed = None
+                    if isinstance(parsed, dict):
+                        data = parsed
+            if data is None:
+                return raw, False
+    if not data:
+        return query, is_broad
+    candidate_query = data.get("query")
+    if isinstance(candidate_query, str) and candidate_query.strip():
+        query = candidate_query.strip()
+    is_broad = coerce_bool(data.get("is_broad"))
+    return query, is_broad
+
+
+def refine_profile_query(query: str) -> Tuple[str, bool]:
+    cleaned = (query or "").strip()
+    if not cleaned or not PROFILE_QUERY_REWRITE_ENABLED:
+        return query, False
+    rewrite_llm = get_profile_rewrite_llm()
+    if rewrite_llm is None:
+        return query, False
+    prompt = f"User question: {cleaned}"
+    try:
+        response = rewrite_llm.invoke(
+            [
+                SystemMessage(content=PROFILE_QUERY_REWRITE_SYSTEM_PROMPT),
+                HumanMessage(content=prompt),
+            ]
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Profile query rewrite failed", exc_info=exc)
+        return query, False
+    return parse_profile_rewrite_response(getattr(response, "content", ""), cleaned)
 
 
 @traceable(name="rerank_candidates")
@@ -1179,11 +1270,20 @@ def search_showcase_repos(query: str, limit: int = 5) -> List[Dict[str, Any]]:
 def retrieve_profile_context(query: str, limit: int = RAG_TOP_K) -> List[Dict[str, Any]]:
     """Retrieve profile context chunks for answering resume/background questions."""
     limit = max(1, min(limit, 10))
+    refined_query, is_broad = refine_profile_query(query)
+    if is_broad:
+        limit = max(limit, PROFILE_BROAD_TOP_K)
+        limit = min(limit, 10)
     candidate_limit = limit
     if RERANK_ENABLED:
         candidate_limit = max(limit, RERANK_MAX_CANDIDATES)
-    candidate_limit = max(1, min(candidate_limit, 10))
-    matches = match_profile_chunks(query, candidate_limit)
+    if is_broad:
+        candidate_limit = max(candidate_limit, PROFILE_BROAD_CANDIDATE_LIMIT)
+    max_candidate_limit = 10
+    if is_broad:
+        max_candidate_limit = max(max_candidate_limit, PROFILE_BROAD_CANDIDATE_LIMIT)
+    candidate_limit = max(1, min(candidate_limit, max_candidate_limit))
+    matches = match_profile_chunks(refined_query, candidate_limit)
     results = []
     for match in matches:
         results.append(
@@ -1194,14 +1294,20 @@ def retrieve_profile_context(query: str, limit: int = RAG_TOP_K) -> List[Dict[st
             }
         )
     results = rerank_candidates(
-        query,
+        refined_query,
         results,
         limit=limit,
         id_key="source",
         text_builder=build_profile_rerank_text,
         fallback_on_empty=True,
     )
-    logger.info("retrieve_profile_context: query=%r hits=%d", query, len(results))
+    logger.info(
+        "retrieve_profile_context: query=%r refined=%r broad=%s hits=%d",
+        query,
+        refined_query,
+        is_broad,
+        len(results),
+    )
     return results
 
 memory_saver = MemorySaver()
