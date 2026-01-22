@@ -254,6 +254,23 @@ def truncate_text(value: Optional[str], limit: int) -> Optional[str]:
     return cleaned[:limit].rstrip()
 
 
+def truncate_text_edges(value: Optional[str], limit: int) -> Optional[str]:
+    if not value:
+        return None
+    cleaned = value.strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    if limit <= 3:
+        return cleaned[:limit].rstrip()
+    head_len = max(1, (limit - 3) // 2)
+    tail_len = limit - 3 - head_len
+    head = cleaned[:head_len].rstrip()
+    tail = cleaned[-tail_len:].lstrip() if tail_len else ""
+    if not tail:
+        return head
+    return f"{head}...{tail}"
+
+
 def normalize_contact_field(value: str, field_name: str) -> str:
     cleaned = value.strip()
     if not cleaned:
@@ -376,7 +393,10 @@ def trim_profile_context(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for row in results[:RAG_TOP_K]:
         trimmed.append(
             {
-                "content": truncate_text(row.get("content"), MAX_PROFILE_CHUNK_CHARS),
+                "content": truncate_text_edges(
+                    row.get("content"),
+                    MAX_PROFILE_CHUNK_CHARS,
+                ),
                 "source": row.get("source"),
                 "score": row.get("score"),
             }
@@ -516,6 +536,7 @@ def rerank_candidates(
     limit: int,
     id_key: str,
     text_builder,
+    fallback_on_empty: bool = False,
 ) -> List[Dict[str, Any]]:
     if not RERANK_ENABLED or len(candidates) <= 1:
         return candidates[:limit]
@@ -575,6 +596,9 @@ def rerank_candidates(
     if ranking is None:
         return subset[:limit]
     if not ranking:
+        if fallback_on_empty:
+            logger.info("Rerank returned empty ranking; falling back to vector order.")
+            return subset[:limit]
         return []
     ordered = [id_to_candidate[item] for item in ranking if item in id_to_candidate]
     if not ordered:
@@ -612,7 +636,7 @@ def build_profile_rerank_text(chunk: Dict[str, Any]) -> str:
         text = f"Source: {source} | {content}"
     else:
         text = content
-    return truncate_text(text, MAX_RERANK_TEXT_CHARS) or ""
+    return truncate_text_edges(text, MAX_RERANK_TEXT_CHARS) or ""
 
 
 def supabase_response_data(response: Any, action: str) -> List[Dict[str, Any]]:
@@ -1072,6 +1096,7 @@ def retrieve_profile_context(query: str, limit: int = RAG_TOP_K) -> List[Dict[st
         limit=limit,
         id_key="source",
         text_builder=build_profile_rerank_text,
+        fallback_on_empty=True,
     )
     logger.info("retrieve_profile_context: query=%r hits=%d", query, len(results))
     return results

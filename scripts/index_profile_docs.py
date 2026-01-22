@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, List
@@ -23,6 +24,7 @@ from app import (
 
 
 SUPPORTED_EXTENSIONS = {".md", ".txt", ".pdf"}
+BULLET = "\u2022"
 
 
 def iter_files(paths: Iterable[Path]) -> List[Path]:
@@ -36,13 +38,47 @@ def iter_files(paths: Iterable[Path]) -> List[Path]:
     return sorted(set(files))
 
 
+def normalize_profile_text(text: str) -> str:
+    cleaned = text.replace("\r", "\n")
+    cleaned = re.sub(r"(?<=\w)-\n(?=\w)", "", cleaned)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    lines = cleaned.split("\n")
+    parts: List[str] = []
+    current: List[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            if current:
+                parts.append(" ".join(current))
+                current = []
+            continue
+        if stripped.startswith(BULLET):
+            if current:
+                parts.append(" ".join(current))
+                current = []
+            parts.append(f"{BULLET} {stripped.lstrip(BULLET).strip()}")
+            continue
+        if stripped.isupper() and len(stripped) <= 60:
+            if current:
+                parts.append(" ".join(current))
+                current = []
+            parts.append(stripped)
+            continue
+        current.append(stripped)
+    if current:
+        parts.append(" ".join(current))
+    normalized = "\n".join(parts)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    return normalized.strip()
+
+
 def read_text(path: Path) -> str:
     if path.suffix.lower() == ".pdf":
         if pypdf is None:
             raise RuntimeError("pypdf is required to read PDF files.")
         reader = pypdf.PdfReader(str(path))
         pages = [page.extract_text() or "" for page in reader.pages]
-        return "\n".join(pages)
+        return normalize_profile_text("\n".join(pages))
     return path.read_text(encoding="utf-8", errors="ignore")
 
 
