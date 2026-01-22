@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -87,6 +88,7 @@ CV_FILE_PATH = os.getenv(
     "CV_FILE_PATH",
     "docs/Vasileios_Christopoulos_GenAI copy.pdf",
 )
+RESUME_DIR = Path(__file__).resolve().parent / "docs" / "resume"
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL")
 RESEND_TO_EMAIL = os.getenv("RESEND_TO_EMAIL")
@@ -287,7 +289,31 @@ def normalize_contact_field(value: str, field_name: str) -> str:
     return cleaned
 
 
+def find_resume_file() -> Optional[Path]:
+    if not RESUME_DIR.exists() or not RESUME_DIR.is_dir():
+        return None
+    files = [path for path in RESUME_DIR.iterdir() if path.is_file()]
+    if not files:
+        return None
+    pdf_files = [path for path in files if path.suffix.lower() == ".pdf"]
+    candidates = pdf_files or files
+    try:
+        return max(candidates, key=lambda path: path.stat().st_mtime)
+    except OSError:
+        return sorted(candidates)[-1]
+
+
+def get_cv_url() -> Optional[str]:
+    resume_file = find_resume_file()
+    if resume_file is None:
+        return None
+    return f"/docs/resume/{resume_file.name}"
+
+
 def resolve_cv_path() -> Path:
+    resume_file = find_resume_file()
+    if resume_file is not None:
+        return resume_file
     path = Path(CV_FILE_PATH)
     if not path.is_absolute():
         path = Path(__file__).resolve().parent / path
@@ -1496,6 +1522,9 @@ def extract_repo_ids_from_messages(messages: List[Any]) -> List[str]:
 
 app = FastAPI(title="Portfolio Agent API", version="0.1.0")
 
+if RESUME_DIR.exists():
+    app.mount("/docs/resume", StaticFiles(directory=str(RESUME_DIR)), name="resume")
+
 # Allow browser calls; replace origins with specific UI domains when known.
 app.add_middleware(
     CORSMiddleware,
@@ -1586,6 +1615,7 @@ async def agent_showcase(request: AgentRequest) -> AgentResponse:
             plan = result.get("plan") or DEFAULT_PLAN
             render_repos = should_render_repos(plan)
             cv_intent = bool(plan.get("cv_intent"))
+            cv_url = get_cv_url() if cv_intent else None
             return AgentResponse(
                 repos=[ShowcaseRepo(**repo) for repo in repos] if repos else [],
                 source="agent",
@@ -1593,7 +1623,7 @@ async def agent_showcase(request: AgentRequest) -> AgentResponse:
                 render_repos=render_repos,
                 contact_intent=bool(plan.get("contact_intent")),
                 cv_intent=cv_intent,
-                cv_url="/cv" if cv_intent else None,
+                cv_url=cv_url,
             )
         except HTTPException:
             raise
