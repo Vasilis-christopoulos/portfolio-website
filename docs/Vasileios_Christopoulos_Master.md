@@ -21,7 +21,7 @@ Analytics and consulting-oriented professional with an entrepreneurial backgroun
 **Business & Consulting:** Structured Problem Solving, ROI Analysis, Process Improvement, Agile, Stakeholder Management, Change Management.
 
 ## Professional Experience
-### Canadian National Railway | Team Lead (MMA Capstone) | Montreal, Canada | Sept 2025 - Present
+### Canadian National Railway | Team Lead - Solutions/Data Architect (MMA Capstone) | Montreal, Canada | Sept 2025 - Present
 - Leading a cross-functional team to design and deliver AI-driven detection systems for railway infrastructure.
 - Impact: targeting a 25% reduction in inspection time and significant maintenance cost savings.
 - Translating multi-modal data (Image, Video, LiDAR) into actionable insights using computer vision and ML.

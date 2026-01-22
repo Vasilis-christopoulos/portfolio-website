@@ -7,7 +7,7 @@ import argparse
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Tuple
 
 try:
     import pypdf
@@ -224,6 +224,35 @@ def normalize_profile_text(text: str) -> str:
     return normalized.strip()
 
 
+def split_section_header(section: str) -> Tuple[Optional[str], str]:
+    lines = section.splitlines()
+    if not lines:
+        return None, ""
+    first_line = lines[0].strip()
+    if first_line.lower().startswith("section:"):
+        title = first_line.split(":", 1)[1].strip() or None
+        body = "\n".join(lines[1:]).strip()
+        return title, body
+    return None, section.strip()
+
+
+def build_chunk_header(title: Optional[str]) -> str:
+    if title:
+        return f"Section: {title}"
+    return "Section: Profile"
+
+
+def chunk_profile_section(section: str) -> List[str]:
+    title, body = split_section_header(section)
+    header = build_chunk_header(title)
+    if not body:
+        return [header]
+    chunks = chunk_text(body)
+    if not chunks:
+        return [header]
+    return [f"{header}\n{chunk}".strip() for chunk in chunks]
+
+
 def read_pdf_text(path: Path) -> str:
     if pypdf is None:
         raise RuntimeError("pypdf is required to read PDF files.")
@@ -257,7 +286,7 @@ def index_file(path: Path) -> int:
     sections = read_profile_sections(path)
     chunks: List[str] = []
     for section in sections:
-        chunks.extend(chunk_text(section))
+        chunks.extend(chunk_profile_section(section))
     if not chunks:
         return 0
     embeddings = get_embeddings()
