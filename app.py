@@ -1859,7 +1859,7 @@ async def contact(http_request: Request, request: ContactRequest) -> ContactResp
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-@app.post("/analytics/event", response_model=AnalyticsEventResponse, status_code=201)
+@app.post("/event", response_model=AnalyticsEventResponse, status_code=201)
 async def analytics_event(
     http_request: Request,
     request: AnalyticsEventRequest,
