@@ -1090,7 +1090,9 @@ def refresh_showcase_cache(limit: int, reason: str) -> None:
     limit = clamp_int(limit, 1, 50)
     logger.info("Refreshing showcase cache reason=%s limit=%d", reason, limit)
     repos = _fetch_showcase_repos(limit)
-    existing_hashes = get_repo_hashes([repo["repo_id"] for repo in repos])
+    repo_ids = [repo.get("repo_id") for repo in repos if repo.get("repo_id")]
+    prune_showcase_cache(repo_ids, limit)
+    existing_hashes = get_repo_hashes(repo_ids)
     upsert_repos_to_cache(repos)
     refresh_repo_chunks(repos, existing_hashes)
 
@@ -1175,6 +1177,22 @@ def fetch_cached_showcase_repo_ids(limit: int) -> Optional[List[str]]:
     return [row["repo_id"] for row in rows if row.get("repo_id")]
 
 
+def load_cached_showcase_repo_ids(limit: int) -> List[str]:
+    """Return cached showcase repo ids without checking freshness."""
+    limit = clamp_int(limit, 1, 50)
+    client = get_supabase()
+    response = (
+        client.table(SUPABASE_REPO_TABLE)
+        .select("repo_id")
+        .eq("is_showcase", True)
+        .order("stars", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    rows = supabase_response_data(response, "load_cached_showcase_repo_ids")
+    return [row["repo_id"] for row in rows if row.get("repo_id")]
+
+
 def load_repos_by_ids(repo_ids: List[str]) -> List[Dict[str, Any]]:
     """Load repo rows in the same order as the provided ids."""
     if not repo_ids:
@@ -1217,6 +1235,30 @@ def upsert_repos_to_cache(repos: List[Dict[str, Any]]) -> None:
         )
     response = client.table(SUPABASE_REPO_TABLE).upsert(payload).execute()
     supabase_response_data(response, "upsert_repos_to_cache")
+
+
+def prune_showcase_cache(current_repo_ids: List[str], limit: int) -> None:
+    """Remove cached showcase repos that no longer appear in the top list."""
+    limit = clamp_int(limit, 1, 50)
+    cached_ids = load_cached_showcase_repo_ids(limit)
+    if not cached_ids:
+        return
+    current_set = {repo_id for repo_id in current_repo_ids if repo_id}
+    stale_ids = [repo_id for repo_id in cached_ids if repo_id not in current_set]
+    if not stale_ids:
+        return
+    client = get_supabase()
+    chunk_size = 50
+    for idx in range(0, len(stale_ids), chunk_size):
+        chunk = stale_ids[idx : idx + chunk_size]
+        response = (
+            client.table(SUPABASE_REPO_TABLE)
+            .delete()
+            .in_("repo_id", chunk)
+            .execute()
+        )
+        supabase_response_data(response, "prune_showcase_cache")
+    logger.info("Pruned showcase cache stale_repos=%d", len(stale_ids))
 
 
 def get_repo_hashes(repo_ids: List[str]) -> Dict[str, str]:
@@ -1320,10 +1362,11 @@ def get_showcase_repos(limit: int) -> List[Dict[str, Any]]:
     if repo_ids:
         return load_repos_by_ids(repo_ids)
     repos = _fetch_showcase_repos(limit)
-    existing_hashes = get_repo_hashes([repo["repo_id"] for repo in repos])
+    repo_ids = [repo.get("repo_id") for repo in repos if repo.get("repo_id")]
+    prune_showcase_cache(repo_ids, limit)
+    existing_hashes = get_repo_hashes(repo_ids)
     upsert_repos_to_cache(repos)
     refresh_repo_chunks(repos, existing_hashes)
-    repo_ids = [repo.get("repo_id") for repo in repos if repo.get("repo_id")]
     return load_repos_by_ids(repo_ids)
 
 def github_headers() -> Dict[str, str]:
@@ -1404,10 +1447,11 @@ def fetch_showcase_repos(limit: int = DEFAULT_LIMIT) -> Dict[str, Any]:
         )
         return {"repo_ids": cached_repo_ids, "source": "cache"}
     repos = _fetch_showcase_repos(limit)
-    existing_hashes = get_repo_hashes([repo["repo_id"] for repo in repos])
+    repo_ids = [repo.get("repo_id") for repo in repos if repo.get("repo_id")]
+    prune_showcase_cache(repo_ids, limit)
+    existing_hashes = get_repo_hashes(repo_ids)
     upsert_repos_to_cache(repos)
     refresh_repo_chunks(repos, existing_hashes)
-    repo_ids = [repo.get("repo_id") for repo in repos if repo.get("repo_id")]
     logger.info("fetch_showcase_repos: source=github repos=%d", len(repo_ids))
     return {"repo_ids": repo_ids, "source": "github"}
 

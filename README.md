@@ -1,3 +1,5 @@
+![Header Banner](images/website_ss.png)
+
 # 🚀 Portfolio Agent API
 
 An AI-powered backend that turns a personal portfolio into a **recruiter-friendly Q&A experience**. It blends GitHub project data, a resume/CV knowledge base, and a planning agent to deliver concise, grounded answers with guardrails and performance optimizations.
