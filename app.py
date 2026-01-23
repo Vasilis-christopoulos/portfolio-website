@@ -37,6 +37,7 @@ except Exception:  # noqa: BLE001
 
 
 def traceable(*args, **kwargs):
+    """Fallback to a no-op decorator when LangSmith tracing is unavailable."""
     if _traceable is None:
         if args and callable(args[0]) and len(args) == 1 and not kwargs:
             return args[0]
@@ -47,6 +48,7 @@ def traceable(*args, **kwargs):
         return decorator
     return _traceable(*args, **kwargs)
 
+# --- Configuration and logging -------------------------------------------------
 load_dotenv(Path(__file__).with_name(".env"))
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -59,6 +61,7 @@ logging.basicConfig(
 for noisy_logger in ("httpx", "httpcore", "hpack", "openai", "urllib3"):
     logging.getLogger(noisy_logger).setLevel(HTTP_LOG_LEVEL)
 
+# --- External services and storage --------------------------------------------
 GITHUB_API_URL = "https://api.github.com"
 DEFAULT_LIMIT = 20
 GITHUB_USERNAME = os.getenv("GITHUB_USERNAME")
@@ -99,6 +102,7 @@ RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL")
 RESEND_TO_EMAIL = os.getenv("RESEND_TO_EMAIL")
 RESEND_API_URL = "https://api.resend.com/emails"
 
+# --- Retrieval, embeddings, and ranking ---------------------------------------
 REPO_CACHE_TTL_SECONDS = int(os.getenv("REPO_CACHE_TTL_SECONDS", "1800"))
 OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "900"))
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
@@ -147,6 +151,7 @@ PROMPT_INJECTION_BLOCK_ENABLED = os.getenv(
     "PROMPT_INJECTION_BLOCK_ENABLED", "true"
 ).lower() in ("1", "true", "yes")
 
+# --- Agent system prompts ------------------------------------------------------
 SYSTEM_PROMPT = (
     "You are Vasilis Christopoulos speaking in the first person. "
     "Answer using the provided context and refer to yourself as 'I' and 'my'. "
@@ -222,6 +227,7 @@ DEFAULT_PLAN = {
     "cv_intent": False,
 }
 
+# --- Prompt-injection guardrails ----------------------------------------------
 PROMPT_INJECTION_RESPONSE = (
     "I can only answer questions about my experience, projects, and skills. "
     "Please ask about my work or portfolio."
@@ -252,12 +258,14 @@ PROMPT_INJECTION_RULES = [
 
 @dataclass(frozen=True)
 class RateLimit:
+    """Simple windowed rate-limit definition."""
     name: str
     max_requests: int
     window_seconds: int
 
 
 class RateLimiter:
+    """Thread-safe in-memory rate limiter using per-key sliding windows."""
     def __init__(self) -> None:
         self._buckets: Dict[Tuple[str, str], deque[float]] = {}
         self._lock = threading.Lock()
@@ -265,6 +273,7 @@ class RateLimiter:
         self._cleanup_interval = 60.0
 
     def _cleanup(self, now: float, max_window: int) -> None:
+        """Drop buckets with activity older than the longest window."""
         if now - self._last_cleanup < self._cleanup_interval:
             return
         cutoff = now - max_window
@@ -274,6 +283,7 @@ class RateLimiter:
         self._last_cleanup = now
 
     def check(self, key: str, limits: List[RateLimit]) -> Optional[int]:
+        """Return retry-after seconds if any limit is exceeded; otherwise record hit."""
         now = time.time()
         retry_after: Optional[int] = None
         with self._lock:
@@ -293,6 +303,7 @@ class RateLimiter:
                     retry_after = max(retry_after or 0, wait)
             if retry_after is not None:
                 return max(1, retry_after)
+            # Only record the hit if we are within all limits.
             for limit in limits:
                 if limit.max_requests <= 0 or limit.window_seconds <= 0:
                     continue
@@ -316,7 +327,14 @@ RATE_LIMIT_MAX_WINDOW = max(
 )
 rate_limiter = RateLimiter()
 
+
+def clamp_int(value: int, min_value: int, max_value: int) -> int:
+    """Clamp numeric values to an inclusive range."""
+    return max(min_value, min(value, max_value))
+
+
 def coerce_bool(value: Any) -> bool:
+    """Best-effort coercion for boolean-like inputs."""
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
@@ -327,6 +345,7 @@ def coerce_bool(value: Any) -> bool:
 
 
 def parse_plan(raw: Any) -> Dict[str, Any]:
+    """Parse planner JSON into a normalized dict with defaults applied."""
     plan = DEFAULT_PLAN.copy()
     data: Optional[Dict[str, Any]] = None
     if isinstance(raw, dict):
@@ -358,6 +377,7 @@ def parse_plan(raw: Any) -> Dict[str, Any]:
     if plan["need_clarification"] and not plan["clarification_question"]:
         plan["clarification_question"] = "Could you clarify what you want to know?"
     if plan["skip_answer"]:
+        # Only allow skip when the request is a pure list/display action.
         if (
             not plan.get("use_repo_list")
             or plan.get("use_repo_search")
@@ -370,6 +390,7 @@ def parse_plan(raw: Any) -> Dict[str, Any]:
 
 
 def get_client_ip(request: Request) -> str:
+    """Resolve client IP address with optional proxy header trust."""
     if TRUST_X_FORWARDED_FOR:
         forwarded_for = request.headers.get("x-forwarded-for")
         if forwarded_for:
@@ -382,6 +403,7 @@ def get_client_ip(request: Request) -> str:
 
 
 def rate_limit_key(value: str, max_len: int = 80) -> str:
+    """Shorten very long keys deterministically for rate-limit buckets."""
     cleaned = value.strip()
     if len(cleaned) > max_len:
         return hashlib.sha256(cleaned.encode("utf-8")).hexdigest()
@@ -393,6 +415,7 @@ def enforce_rate_limits(
     session_id: Optional[str],
     scope: str,
 ) -> None:
+    """Apply IP and session limits and raise HTTP 429 on violations."""
     ip = get_client_ip(request)
     retry_after: Optional[int] = None
     if ip:
@@ -414,6 +437,7 @@ def enforce_rate_limits(
 
 
 def detect_prompt_injection(query: str) -> Optional[str]:
+    """Return the rule name if prompt-injection patterns are detected."""
     if not PROMPT_INJECTION_BLOCK_ENABLED:
         return None
     cleaned = (query or "").strip()
@@ -426,6 +450,7 @@ def detect_prompt_injection(query: str) -> Optional[str]:
 
 
 def get_last_user_text(messages: List[Any]) -> str:
+    """Extract the most recent user message text from the conversation."""
     for message in reversed(messages):
         if isinstance(message, HumanMessage):
             return message.content
@@ -433,6 +458,7 @@ def get_last_user_text(messages: List[Any]) -> str:
 
 
 def should_render_repos(plan: Optional[Dict[str, Any]]) -> bool:
+    """Decide whether the UI should render repo cards for this response."""
     if not plan:
         return False
     if plan.get("contact_intent"):
@@ -454,6 +480,7 @@ def should_render_repos(plan: Optional[Dict[str, Any]]) -> bool:
 
 
 def truncate_text(value: Optional[str], limit: int) -> Optional[str]:
+    """Trim text to a maximum length, preserving whole-string semantics."""
     if not value:
         return None
     cleaned = value.strip()
@@ -463,6 +490,7 @@ def truncate_text(value: Optional[str], limit: int) -> Optional[str]:
 
 
 def truncate_text_edges(value: Optional[str], limit: int) -> Optional[str]:
+    """Trim text while keeping both head and tail for context."""
     if not value:
         return None
     cleaned = value.strip()
@@ -480,6 +508,7 @@ def truncate_text_edges(value: Optional[str], limit: int) -> Optional[str]:
 
 
 def normalize_contact_field(value: str, field_name: str) -> str:
+    """Normalize and validate required contact form fields."""
     cleaned = value.strip()
     if not cleaned:
         raise HTTPException(status_code=422, detail=f"{field_name} is required.")
@@ -487,6 +516,7 @@ def normalize_contact_field(value: str, field_name: str) -> str:
 
 
 def find_resume_file() -> Optional[Path]:
+    """Find the newest resume file in the resume directory, if present."""
     if not RESUME_DIR.exists() or not RESUME_DIR.is_dir():
         return None
     files = [path for path in RESUME_DIR.iterdir() if path.is_file()]
@@ -501,6 +531,7 @@ def find_resume_file() -> Optional[Path]:
 
 
 def get_cv_url() -> Optional[str]:
+    """Return a public URL for the newest resume file."""
     resume_file = find_resume_file()
     if resume_file is None:
         return None
@@ -508,6 +539,7 @@ def get_cv_url() -> Optional[str]:
 
 
 def resolve_cv_path() -> Path:
+    """Resolve the CV file path from the resume folder or fallback path."""
     resume_file = find_resume_file()
     if resume_file is not None:
         return resume_file
@@ -518,6 +550,7 @@ def resolve_cv_path() -> Path:
 
 
 def send_contact_email(name: str, email: str, message: str) -> None:
+    """Send an email notification for a contact form submission."""
     if not RESEND_API_KEY or not RESEND_FROM_EMAIL or not RESEND_TO_EMAIL:
         raise RuntimeError(
             "Resend is not configured. Set RESEND_API_KEY, RESEND_FROM_EMAIL, RESEND_TO_EMAIL."
@@ -557,6 +590,7 @@ def send_contact_email(name: str, email: str, message: str) -> None:
 
 
 def log_user_message(message: str, session_id: Optional[str]) -> Optional[str]:
+    """Persist a user message to Supabase and return the row id."""
     cleaned = message.strip()
     if not cleaned:
         return None
@@ -574,6 +608,7 @@ def log_event(
     session_id: Optional[str],
     metadata: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
+    """Persist an analytics event to Supabase and return the row id."""
     cleaned = event_type.strip()
     if not cleaned:
         return None
@@ -589,6 +624,7 @@ def log_event(
 
 
 async def safe_log_user_message(message: str, session_id: Optional[str]) -> None:
+    """Fire-and-forget wrapper for log_user_message with error suppression."""
     try:
         await asyncio.to_thread(log_user_message, message, session_id)
     except Exception as exc:  # noqa: BLE001
@@ -600,6 +636,7 @@ async def safe_log_event(
     session_id: Optional[str],
     metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
+    """Fire-and-forget wrapper for log_event with error suppression."""
     try:
         await asyncio.to_thread(log_event, event_type, session_id, metadata)
     except Exception as exc:  # noqa: BLE001
@@ -607,6 +644,7 @@ async def safe_log_event(
 
 
 def build_repo_summaries(repos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Create compact repo summaries for LLM context and comparisons."""
     summaries: List[Dict[str, Any]] = []
     for repo in repos[:MAX_CONTEXT_REPOS]:
         summaries.append(
@@ -630,6 +668,7 @@ def merge_repos_by_id(
     primary: List[Dict[str, Any]],
     secondary: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
+    """Merge repo lists while preserving order and de-duplicating by repo_id."""
     merged: List[Dict[str, Any]] = []
     seen = set()
     for repo in primary + secondary:
@@ -643,6 +682,7 @@ def merge_repos_by_id(
 
 
 def trim_repo_search_results(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Limit repo search results to UI-friendly snippets and fields."""
     trimmed: List[Dict[str, Any]] = []
     for row in results[:MAX_REPO_SEARCH_RESULTS]:
         snippets = row.get("snippets") or []
@@ -671,6 +711,7 @@ def trim_repo_search_results(results: List[Dict[str, Any]]) -> List[Dict[str, An
 
 
 def trim_profile_context(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Trim resume/profile chunks to a safe size for LLM prompts."""
     trimmed: List[Dict[str, Any]] = []
     max_items = max(1, PROFILE_CONTEXT_MAX_ITEMS)
     for row in results[:max_items]:
@@ -688,11 +729,13 @@ def trim_profile_context(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def format_repo_summaries_for_context(summaries: List[Dict[str, Any]]) -> str:
+    """Serialize repo summaries for agent context injection."""
     trimmed = summaries[:MAX_CONTEXT_REPOS]
     return json.dumps(trimmed, ensure_ascii=True)
 
 
 class AgentState(TypedDict, total=False):
+    """State container for the LangGraph execution."""
     messages: Annotated[List[Any], add_messages]
     repos: Optional[List[Dict[str, Any]]]
     plan: Optional[Dict[str, Any]]
@@ -706,6 +749,7 @@ class AgentState(TypedDict, total=False):
 
 
 class AgentRequest(BaseModel):
+    """Incoming agent request payload."""
     query: str = Field(default="Fetch showcase repositories for the portfolio UI.")
     limit: int = Field(default=DEFAULT_LIMIT, ge=1, le=50)
     session_id: Optional[str] = Field(
@@ -719,6 +763,7 @@ class AgentRequest(BaseModel):
 
 
 class ShowcaseRepo(BaseModel):
+    """Normalized repo representation for API responses and storage."""
     repo_id: Optional[str] = None
     title: str
     description: Optional[str] = None
@@ -730,6 +775,7 @@ class ShowcaseRepo(BaseModel):
 
 
 class AgentResponse(BaseModel):
+    """Agent response payload returned to the frontend."""
     repos: List[ShowcaseRepo]
     source: str
     raw_output: Optional[Any] = None
@@ -740,23 +786,27 @@ class AgentResponse(BaseModel):
 
 
 class ContactRequest(BaseModel):
+    """Contact form submission payload."""
     name: str = Field(..., min_length=1, max_length=120)
     email: EmailStr
     message: str = Field(..., min_length=1, max_length=2000)
 
 
 class ContactResponse(BaseModel):
+    """Contact form submission response."""
     id: Optional[str] = None
     status: str = "ok"
 
 
 class AnalyticsEventRequest(BaseModel):
+    """Analytics event submission payload."""
     session_id: Optional[str] = None
     event_type: str = Field(..., min_length=1, max_length=120)
     metadata: Optional[Dict[str, Any]] = None
 
 
 class AnalyticsEventResponse(BaseModel):
+    """Analytics event submission response."""
     id: Optional[str] = None
     status: str = "ok"
 
@@ -768,6 +818,7 @@ _profile_rewrite_llm: Optional[ChatOpenAI] = None
 
 
 def get_supabase() -> Client:
+    """Return a cached Supabase client or create one lazily."""
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY are required.")
     global _supabase_client
@@ -777,6 +828,7 @@ def get_supabase() -> Client:
 
 
 def get_embeddings() -> OpenAIEmbeddings:
+    """Return a cached OpenAI embeddings client."""
     global _embeddings_client
     if _embeddings_client is None:
         _embeddings_client = OpenAIEmbeddings(
@@ -787,6 +839,7 @@ def get_embeddings() -> OpenAIEmbeddings:
 
 
 def get_rerank_llm() -> Optional[ChatOpenAI]:
+    """Return a cached rerank model instance if the API key is configured."""
     if not os.getenv("OPENAI_API_KEY"):
         return None
     global _rerank_llm
@@ -800,6 +853,7 @@ def get_rerank_llm() -> Optional[ChatOpenAI]:
 
 
 def get_profile_rewrite_llm() -> Optional[ChatOpenAI]:
+    """Return a cached query-rewrite model instance if the API key is configured."""
     if not os.getenv("OPENAI_API_KEY"):
         return None
     global _profile_rewrite_llm
@@ -813,6 +867,7 @@ def get_profile_rewrite_llm() -> Optional[ChatOpenAI]:
 
 
 def parse_rerank_response(raw: Any) -> Optional[List[str]]:
+    """Parse rerank JSON output into a list of ids."""
     if isinstance(raw, list):
         return [item for item in raw if isinstance(item, str)]
     if not isinstance(raw, str):
@@ -838,6 +893,7 @@ def parse_rerank_response(raw: Any) -> Optional[List[str]]:
 
 
 def parse_profile_rewrite_response(raw: Any, original: str) -> Tuple[str, bool]:
+    """Parse rewrite JSON output, falling back to the original query."""
     query = original
     is_broad = False
     data: Optional[Dict[str, Any]] = None
@@ -874,6 +930,7 @@ def parse_profile_rewrite_response(raw: Any, original: str) -> Tuple[str, bool]:
 
 
 def refine_profile_query(query: str) -> Tuple[str, bool]:
+    """Optionally rewrite profile queries to improve retrieval recall."""
     cleaned = (query or "").strip()
     if not cleaned or not PROFILE_QUERY_REWRITE_ENABLED:
         return query, False
@@ -904,6 +961,7 @@ def rerank_candidates(
     text_builder,
     fallback_on_empty: bool = False,
 ) -> List[Dict[str, Any]]:
+    """Reorder candidates using an LLM reranker, with fallbacks and skips."""
     if not RERANK_ENABLED or len(candidates) <= 1:
         return candidates[:limit]
     rerank_llm = get_rerank_llm()
@@ -927,6 +985,7 @@ def rerank_candidates(
         and top_value >= RERANK_SKIP_SCORE
         and (top_value - second_value) >= RERANK_SKIP_MARGIN
     ):
+        # If the vector similarity is already decisive, skip reranking to save cost.
         logger.debug(
             "Rerank skipped (score=%.3f margin=%.3f)",
             top_value,
@@ -973,6 +1032,7 @@ def rerank_candidates(
 
 
 def build_repo_rerank_text(repo: Dict[str, Any]) -> str:
+    """Build a compact text representation for repo reranking."""
     parts: List[str] = []
     title = repo.get("title")
     description = repo.get("description")
@@ -996,6 +1056,7 @@ def build_repo_rerank_text(repo: Dict[str, Any]) -> str:
 
 
 def build_profile_rerank_text(chunk: Dict[str, Any]) -> str:
+    """Build a compact text representation for profile chunk reranking."""
     content = chunk.get("content") or ""
     source = chunk.get("source")
     if source:
@@ -1006,6 +1067,7 @@ def build_profile_rerank_text(chunk: Dict[str, Any]) -> str:
 
 
 def supabase_response_data(response: Any, action: str) -> List[Dict[str, Any]]:
+    """Extract Supabase data or raise on errors."""
     error = getattr(response, "error", None)
     if error:
         logger.error("Supabase error on %s: %s", action, error)
@@ -1014,6 +1076,7 @@ def supabase_response_data(response: Any, action: str) -> List[Dict[str, Any]]:
 
 
 def to_pgvector_literal(vector: List[float]) -> str:
+    """Convert a vector into pgvector literal syntax with validation."""
     parts = []
     for value in vector:
         if not math.isfinite(value):
@@ -1023,7 +1086,8 @@ def to_pgvector_literal(vector: List[float]) -> str:
 
 
 def refresh_showcase_cache(limit: int, reason: str) -> None:
-    limit = max(1, min(limit, 50))
+    """Refresh cached showcase repositories and their embeddings."""
+    limit = clamp_int(limit, 1, 50)
     logger.info("Refreshing showcase cache reason=%s limit=%d", reason, limit)
     repos = _fetch_showcase_repos(limit)
     existing_hashes = get_repo_hashes([repo["repo_id"] for repo in repos])
@@ -1032,6 +1096,7 @@ def refresh_showcase_cache(limit: int, reason: str) -> None:
 
 
 def parse_timestamp(value: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO timestamp into a timezone-aware datetime."""
     if not value:
         return None
     try:
@@ -1043,6 +1108,7 @@ def parse_timestamp(value: Optional[str]) -> Optional[datetime]:
 
 
 def chunk_text(text: str) -> List[str]:
+    """Split text into overlapping chunks for embeddings."""
     cleaned = text.strip()
     if not cleaned:
         return []
@@ -1061,6 +1127,7 @@ def chunk_text(text: str) -> List[str]:
 
 
 def repo_content_hash(repo: Dict[str, Any]) -> str:
+    """Create a stable hash of repo content for cache invalidation."""
     raw = "\n".join(
         [
             str(repo.get("title") or ""),
@@ -1072,6 +1139,7 @@ def repo_content_hash(repo: Dict[str, Any]) -> str:
 
 
 def build_repo_embedding_text(repo: Dict[str, Any]) -> str:
+    """Assemble the full repo text used for embeddings."""
     parts = []
     title = repo.get("title")
     description = repo.get("description")
@@ -1086,6 +1154,7 @@ def build_repo_embedding_text(repo: Dict[str, Any]) -> str:
 
 
 def fetch_cached_showcase_repo_ids(limit: int) -> Optional[List[str]]:
+    """Return cached showcase repo ids if the cache is fresh."""
     client = get_supabase()
     response = (
         client.table(SUPABASE_REPO_TABLE)
@@ -1107,6 +1176,7 @@ def fetch_cached_showcase_repo_ids(limit: int) -> Optional[List[str]]:
 
 
 def load_repos_by_ids(repo_ids: List[str]) -> List[Dict[str, Any]]:
+    """Load repo rows in the same order as the provided ids."""
     if not repo_ids:
         return []
     client = get_supabase()
@@ -1123,6 +1193,7 @@ def load_repos_by_ids(repo_ids: List[str]) -> List[Dict[str, Any]]:
 
 
 def upsert_repos_to_cache(repos: List[Dict[str, Any]]) -> None:
+    """Upsert repo metadata and content into the cache table."""
     if not repos:
         return
     client = get_supabase()
@@ -1149,6 +1220,7 @@ def upsert_repos_to_cache(repos: List[Dict[str, Any]]) -> None:
 
 
 def get_repo_hashes(repo_ids: List[str]) -> Dict[str, str]:
+    """Fetch current content hashes for cached repos."""
     if not repo_ids:
         return {}
     client = get_supabase()
@@ -1166,6 +1238,7 @@ def refresh_repo_chunks(
     repos: List[Dict[str, Any]],
     existing_hashes: Optional[Dict[str, str]] = None,
 ) -> None:
+    """Recompute and store repo embeddings when content changes."""
     if not repos or not REPO_EMBEDDINGS_ON_REFRESH:
         return
     client = get_supabase()
@@ -1210,6 +1283,7 @@ def refresh_repo_chunks(
 
 @traceable(name="match_repo_chunks")
 def match_repo_chunks(query: str, limit: int) -> List[Dict[str, Any]]:
+    """Run vector similarity search against repo chunks."""
     client = get_supabase()
     embeddings = get_embeddings()
     query_vector = to_pgvector_literal(embeddings.embed_query(query))
@@ -1225,6 +1299,7 @@ def match_repo_chunks(query: str, limit: int) -> List[Dict[str, Any]]:
 
 @traceable(name="match_profile_chunks")
 def match_profile_chunks(query: str, limit: int) -> List[Dict[str, Any]]:
+    """Run vector similarity search against profile chunks."""
     client = get_supabase()
     embeddings = get_embeddings()
     query_vector = to_pgvector_literal(embeddings.embed_query(query))
@@ -1239,7 +1314,8 @@ def match_profile_chunks(query: str, limit: int) -> List[Dict[str, Any]]:
 
 
 def get_showcase_repos(limit: int) -> List[Dict[str, Any]]:
-    limit = max(1, min(limit, 50))
+    """Return showcase repos, using cache when possible."""
+    limit = clamp_int(limit, 1, 50)
     repo_ids = fetch_cached_showcase_repo_ids(limit)
     if repo_ids:
         return load_repos_by_ids(repo_ids)
@@ -1251,6 +1327,7 @@ def get_showcase_repos(limit: int) -> List[Dict[str, Any]]:
     return load_repos_by_ids(repo_ids)
 
 def github_headers() -> Dict[str, str]:
+    """Build GitHub API request headers with optional auth token."""
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
@@ -1263,9 +1340,10 @@ def github_headers() -> Dict[str, str]:
 
 
 def _fetch_showcase_repos(limit: int) -> List[Dict[str, Any]]:
+    """Fetch showcase repos from GitHub and enrich with README content."""
     if not GITHUB_USERNAME:
         raise RuntimeError("GITHUB_USERNAME is required to scope results to your repos.")
-    limit = max(1, min(limit, 50))
+    limit = clamp_int(limit, 1, 50)
     repos: List[Dict[str, Any]] = []
     try:
         with httpx.Client(timeout=15.0, headers=github_headers()) as client:
@@ -1282,6 +1360,7 @@ def _fetch_showcase_repos(limit: int) -> List[Dict[str, Any]]:
             for item in search_resp.json().get("items", []):
                 owner = item["owner"]["login"]
                 name = item["name"]
+                # Fetch README in raw format to enrich embeddings and summaries.
                 readme_resp = client.get(
                     f"{GITHUB_API_URL}/repos/{owner}/{name}/readme",
                     headers={
@@ -1316,7 +1395,7 @@ def _fetch_showcase_repos(limit: int) -> List[Dict[str, Any]]:
 @tool
 def fetch_showcase_repos(limit: int = DEFAULT_LIMIT) -> Dict[str, Any]:
     """Fetch showcase repos and cache them. Returns repo ids for lookup."""
-    limit = max(1, min(limit, 50))
+    limit = clamp_int(limit, 1, 50)
     cached_repo_ids = fetch_cached_showcase_repo_ids(limit)
     if cached_repo_ids:
         logger.info(
@@ -1336,11 +1415,11 @@ def fetch_showcase_repos(limit: int = DEFAULT_LIMIT) -> Dict[str, Any]:
 @tool
 def search_showcase_repos(query: str, limit: int = 5) -> List[Dict[str, Any]]:
     """Search cached repo content for targeted questions."""
-    limit = max(1, min(limit, 10))
+    limit = clamp_int(limit, 1, 10)
     candidate_limit = limit
     if RERANK_ENABLED:
         candidate_limit = max(limit, RERANK_MAX_CANDIDATES)
-    candidate_limit = max(1, min(candidate_limit, 10))
+    candidate_limit = clamp_int(candidate_limit, 1, 10)
     try:
         matches = match_repo_chunks(query, candidate_limit)
     except Exception as exc:  # noqa: BLE001
@@ -1441,9 +1520,10 @@ def search_showcase_repos(query: str, limit: int = 5) -> List[Dict[str, Any]]:
 @tool
 def retrieve_profile_context(query: str, limit: int = RAG_TOP_K) -> List[Dict[str, Any]]:
     """Retrieve profile context chunks for answering resume/background questions."""
-    limit = max(1, min(limit, 10))
+    limit = clamp_int(limit, 1, 10)
     refined_query, is_broad = refine_profile_query(query)
     if is_broad:
+        # Broader questions get a wider context window (still capped for safety).
         limit = max(limit, PROFILE_BROAD_TOP_K)
         limit = min(limit, 10)
     candidate_limit = limit
@@ -1454,7 +1534,7 @@ def retrieve_profile_context(query: str, limit: int = RAG_TOP_K) -> List[Dict[st
     max_candidate_limit = 10
     if is_broad:
         max_candidate_limit = max(max_candidate_limit, PROFILE_BROAD_CANDIDATE_LIMIT)
-    candidate_limit = max(1, min(candidate_limit, max_candidate_limit))
+    candidate_limit = clamp_int(candidate_limit, 1, max_candidate_limit)
     matches = match_profile_chunks(refined_query, candidate_limit)
     results = []
     for match in matches:
@@ -1486,6 +1566,7 @@ memory_saver = MemorySaver()
 
 
 def build_agent_graph():
+    """Construct and compile the LangGraph workflow for the agent."""
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is required to run the agent.")
@@ -1503,6 +1584,7 @@ def build_agent_graph():
 
     @traceable(name="build_plan")
     async def build_plan(state: AgentState) -> Dict[str, Any]:
+        """LLM planner step: decide which retrieval sources to use."""
         messages = state.get("messages", [])
         last_user_text = get_last_user_text(messages)
         if not last_user_text:
@@ -1525,6 +1607,7 @@ def build_agent_graph():
 
     @traceable(name="execute_plan")
     def execute_plan(state: AgentState) -> Dict[str, Any]:
+        """Execute retrieval based on the planner output."""
         plan = state.get("plan") or DEFAULT_PLAN
         messages = state.get("messages", [])
         last_user_text = get_last_user_text(messages)
@@ -1581,6 +1664,7 @@ def build_agent_graph():
                 repos_from_list,
             )
         if plan.get("should_compare") and not repos_for_response:
+            # When comparisons are requested, reuse cached repos if available.
             cached_ids = state.get("last_repo_ids") or []
             cached_summaries = state.get("last_repo_summaries") or []
             if cached_ids:
@@ -1612,6 +1696,7 @@ def build_agent_graph():
 
     @traceable(name="answer")
     async def answer(state: AgentState) -> Dict[str, Any]:
+        """Compose the final response using gathered context."""
         plan = state.get("plan") or DEFAULT_PLAN
         if plan.get("contact_intent"):
             message = (
@@ -1661,6 +1746,7 @@ def build_agent_graph():
         return {"messages": [response]}
 
     def should_skip_answer(state: AgentState) -> bool:
+        """Decide whether to skip LLM answering and return repo data only."""
         plan = state.get("plan") or DEFAULT_PLAN
         if plan.get("need_clarification"):
             return False
@@ -1678,6 +1764,7 @@ def build_agent_graph():
         )
 
     def route_after_retrieve(state: AgentState) -> str:
+        """Route to the answer node unless this is a list-only request."""
         if should_skip_answer(state):
             return "end"
         return "answer"
@@ -1703,6 +1790,7 @@ agent_graph = None
 
 
 def get_agent_graph():
+    """Return a cached agent graph instance."""
     global agent_graph
     if agent_graph is None:
         agent_graph = build_agent_graph()
@@ -1710,6 +1798,7 @@ def get_agent_graph():
 
 
 def extract_repos_from_messages(messages: List[Any]) -> List[Dict[str, Any]]:
+    """Extract repo payloads from tool or assistant messages."""
     logger.debug(f"extract_repos_from_messages called with {len(messages)} messages")
     # Prefer tool message output (raw tool result).
     for message in reversed(messages):
@@ -1734,7 +1823,7 @@ def extract_repos_from_messages(messages: List[Any]) -> List[Dict[str, Any]]:
                 except json.JSONDecodeError as e:
                     logger.debug(f"JSON decode failed: {e}")
                     pass
-                # Try Python literal eval for strings like "[{'key': 'value'}]"
+                # Try Python literal eval for strings like "[{'key': 'value'}]".
                 try:
                     import ast
                     parsed = ast.literal_eval(content)
@@ -1761,6 +1850,7 @@ def extract_repos_from_messages(messages: List[Any]) -> List[Dict[str, Any]]:
 
 
 def extract_repo_ids_from_messages(messages: List[Any]) -> List[str]:
+    """Extract repo_ids from tool messages for caching and context."""
     logger.debug(f"extract_repo_ids_from_messages called with {len(messages)} messages")
     repo_ids: List[str] = []
     for message in reversed(messages):
@@ -1807,6 +1897,7 @@ def extract_repo_ids_from_messages(messages: List[Any]) -> List[str]:
     return deduped
 
 
+# --- FastAPI app and routes ----------------------------------------------------
 app = FastAPI(title="Portfolio Agent API", version="0.1.0")
 
 if RESUME_DIR.exists():
@@ -1823,11 +1914,13 @@ app.add_middleware(
 
 @app.get("/health")
 async def health() -> Dict[str, str]:
+    """Health check endpoint for uptime monitoring."""
     return {"status": "ok"}
 
 
 @app.get("/cv")
 async def download_cv() -> FileResponse:
+    """Serve the most recent CV file."""
     cv_path = resolve_cv_path()
     if not cv_path.exists():
         raise HTTPException(status_code=404, detail="CV file not found.")
@@ -1840,6 +1933,7 @@ async def download_cv() -> FileResponse:
 
 @app.post("/contact", response_model=ContactResponse, status_code=201)
 async def contact(http_request: Request, request: ContactRequest) -> ContactResponse:
+    """Store contact messages and notify via email."""
     enforce_rate_limits(http_request, None, scope="contact")
     name = normalize_contact_field(request.name, "name")
     email = normalize_contact_field(str(request.email), "email")
@@ -1864,6 +1958,7 @@ async def analytics_event(
     http_request: Request,
     request: AnalyticsEventRequest,
 ) -> AnalyticsEventResponse:
+    """Record analytics events asynchronously."""
     session_id = request.session_id.strip() if request.session_id else None
     enforce_rate_limits(http_request, session_id, scope="analytics")
     asyncio.create_task(
@@ -1877,11 +1972,13 @@ async def agent_showcase(
     http_request: Request,
     request: AgentRequest,
 ) -> AgentResponse:
+    """Main agent endpoint: answer queries and optionally return repos."""
     session_id = request.session_id.strip() if request.session_id else None
     enforce_rate_limits(http_request, session_id, scope="agent")
     if request.use_agent:
         injection_reason = detect_prompt_injection(request.query)
         if injection_reason:
+            # Short-circuit on suspected prompt-injection attempts.
             logger.warning(
                 "Prompt injection blocked",
                 extra={"reason": injection_reason},
