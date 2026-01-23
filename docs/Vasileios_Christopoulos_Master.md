@@ -2,7 +2,7 @@
 
 Montreal, Canada | vchristopoulos99@gmail.com | +1 (579) 368 6746 | LinkedIn | GitHub
 
-## Professional Summary
+## Summary
 Analytics and consulting-oriented professional with an entrepreneurial background, currently pursuing a Master of Management in Analytics at McGill University. Specialized in building Agentic AI systems and data-driven frameworks to support strategic decision-making and business transformation. Expert at translating complex technical architectures into actionable business value for stakeholders.
 
 ## Technical Skills

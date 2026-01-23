@@ -42,6 +42,44 @@ SECTION_TITLES = {
     "skills",
     "languages",
 }
+SECTION_TAGS = [
+    (
+        ("professional experience", "work experience", "experience"),
+        ["experience", "work history", "employers", "companies", "roles"],
+    ),
+    (
+        ("professional summary", "summary", "profile"),
+        ["summary", "overview", "profile"],
+    ),
+    (
+        ("technical skills", "skills"),
+        ["skills", "tools", "stack", "technologies"],
+    ),
+    (
+        ("high-impact ai projects", "projects"),
+        ["projects", "case studies", "work samples"],
+    ),
+    (
+        ("education",),
+        ["education", "degrees", "university"],
+    ),
+    (
+        (
+            "leadership & honors/awards",
+            "leadership & honors",
+            "honors/awards",
+            "leadership",
+            "honors",
+            "awards",
+        ),
+        ["leadership", "awards", "honors", "achievements"],
+    ),
+    (
+        ("certifications & courses", "certifications", "courses"),
+        ["certifications", "courses"],
+    ),
+    (("languages",), ["languages"]),
+]
 
 
 def iter_files(paths: Iterable[Path]) -> List[Path]:
@@ -86,16 +124,28 @@ def load_docling_markdown(path: Path) -> Optional[str]:
     return None
 
 
-def format_section(title: Optional[str], lines: List[str]) -> str:
+def format_section(
+    section_title: Optional[str],
+    entry_title: Optional[str],
+    lines: List[str],
+) -> str:
     body = "\n".join(line for line in lines if line)
-    if not title:
-        return body.strip()
-    return f"Section: {title}\n{body}".strip()
+    header_lines: List[str] = []
+    if section_title:
+        header_lines.append(f"Section: {section_title}")
+    if entry_title:
+        header_lines.append(f"Entry: {entry_title}")
+    if header_lines:
+        if body:
+            return "\n".join(header_lines + [body]).strip()
+        return "\n".join(header_lines).strip()
+    return body.strip()
 
 
 def split_markdown_sections(markdown: str) -> List[str]:
     sections: List[str] = []
-    current_title: Optional[str] = None
+    current_section_title: Optional[str] = None
+    current_entry_title: Optional[str] = None
     current_lines: List[str] = []
     for line in markdown.splitlines():
         stripped = line.strip()
@@ -104,14 +154,42 @@ def split_markdown_sections(markdown: str) -> List[str]:
                 current_lines.append("")
             continue
         if stripped.startswith("#"):
-            if current_lines:
-                sections.append(format_section(current_title, current_lines))
-                current_lines = []
-            current_title = stripped.lstrip("#").strip() or None
-            continue
+            level = len(stripped) - len(stripped.lstrip("#"))
+            title = stripped.lstrip("#").strip() or None
+            if level <= 2:
+                if current_lines:
+                    sections.append(
+                        format_section(
+                            current_section_title,
+                            current_entry_title,
+                            current_lines,
+                        )
+                    )
+                    current_lines = []
+                current_section_title = title
+                current_entry_title = None
+                continue
+            if level == 3:
+                if current_lines:
+                    sections.append(
+                        format_section(
+                            current_section_title,
+                            current_entry_title,
+                            current_lines,
+                        )
+                    )
+                    current_lines = []
+                current_entry_title = title
+                continue
         current_lines.append(stripped)
     if current_lines:
-        sections.append(format_section(current_title, current_lines))
+        sections.append(
+            format_section(
+                current_section_title,
+                current_entry_title,
+                current_lines,
+            )
+        )
     return [section for section in sections if section.strip()]
 
 
@@ -170,23 +248,23 @@ def split_text_sections(text: str) -> List[str]:
                 if heading_index is not None:
                     previous_lines = current_lines[:heading_index]
                     if previous_lines:
-                        sections.append(format_section(current_title, previous_lines))
+                        sections.append(format_section(current_title, None, previous_lines))
                     current_title = heading
                     current_lines = []
                     continue
             if current_lines:
-                sections.append(format_section(current_title, current_lines))
+                sections.append(format_section(current_title, None, current_lines))
                 current_lines = []
             continue
         if is_section_heading(stripped):
             if current_lines:
-                sections.append(format_section(current_title, current_lines))
+                sections.append(format_section(current_title, None, current_lines))
                 current_lines = []
             current_title = stripped
             continue
         current_lines.append(stripped)
     if current_lines:
-        sections.append(format_section(current_title, current_lines))
+        sections.append(format_section(current_title, None, current_lines))
     return [section for section in sections if section.strip()]
 
 
@@ -224,27 +302,61 @@ def normalize_profile_text(text: str) -> str:
     return normalized.strip()
 
 
-def split_section_header(section: str) -> Tuple[Optional[str], str]:
+def split_section_header(section: str) -> Tuple[Optional[str], Optional[str], str]:
     lines = section.splitlines()
     if not lines:
-        return None, ""
-    first_line = lines[0].strip()
-    if first_line.lower().startswith("section:"):
-        title = first_line.split(":", 1)[1].strip() or None
-        body = "\n".join(lines[1:]).strip()
-        return title, body
-    return None, section.strip()
+        return None, None, ""
+    section_title: Optional[str] = None
+    entry_title: Optional[str] = None
+    idx = 0
+    while idx < len(lines):
+        line = lines[idx].strip()
+        lowered = line.lower()
+        if lowered.startswith("section:") and section_title is None:
+            section_title = line.split(":", 1)[1].strip() or None
+            idx += 1
+            continue
+        if lowered.startswith("entry:") and entry_title is None:
+            entry_title = line.split(":", 1)[1].strip() or None
+            idx += 1
+            continue
+        break
+    body = "\n".join(lines[idx:]).strip()
+    return section_title, entry_title, body
 
 
-def build_chunk_header(title: Optional[str]) -> str:
-    if title:
-        return f"Section: {title}"
-    return "Section: Profile"
+def get_section_tags(section_title: Optional[str]) -> List[str]:
+    if not section_title:
+        return []
+    lowered = section_title.lower()
+    tags: List[str] = []
+    seen = set()
+    for keywords, values in SECTION_TAGS:
+        if any(keyword in lowered for keyword in keywords):
+            for tag in values:
+                if tag not in seen:
+                    tags.append(tag)
+                    seen.add(tag)
+    return tags
+
+
+def build_chunk_header(
+    section_title: Optional[str],
+    entry_title: Optional[str],
+    tags: List[str],
+) -> str:
+    header = f"Section: {section_title}" if section_title else "Section: Profile"
+    if entry_title:
+        header = f"{header} | Entry: {entry_title}"
+    if tags:
+        header = f"{header} | Tags: {', '.join(tags)}"
+    return header
 
 
 def chunk_profile_section(section: str) -> List[str]:
-    title, body = split_section_header(section)
-    header = build_chunk_header(title)
+    section_title, entry_title, body = split_section_header(section)
+    tags = get_section_tags(section_title)
+    header = build_chunk_header(section_title, entry_title, tags)
     if not body:
         return [header]
     chunks = chunk_text(body)
