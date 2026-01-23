@@ -1,16 +1,16 @@
-"""Test script to verify direct_return tool optimization."""
+"""Test script to verify list-only fast path behavior."""
 import asyncio
 import logging
 
 from langchain_core.messages import HumanMessage
-from app import build_agent_graph, extract_repos_from_messages
+from app import build_agent_graph
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 async def main():
-    """Test the agent with direct_return optimization."""
+    """Test the agent with list-only fast path behavior."""
     agent = build_agent_graph()
     
     query = "Fetch 2 showcase repositories"
@@ -28,44 +28,32 @@ async def main():
     
     messages = result.get("messages", [])
     logger.info(f"\nTotal messages in flow: {len(messages)}")
+    logger.info(f"Plan: {result.get('plan')}")
     
     for i, msg in enumerate(messages):
         msg_type = type(msg).__name__
         logger.info(f"\n{i+1}. {msg_type}")
         
-        if hasattr(msg, 'tool_calls') and msg.tool_calls:
-            logger.info(f"   → Calls tool: {msg.tool_calls[0]['name']}")
-        
-        if msg_type == "ToolMessage":
-            content_preview = str(msg.content)[:100] if msg.content else ""
-            logger.info(f"   → Returns: {content_preview}...")
-        
-        if msg_type == "AIMessage" and not msg.tool_calls:
+        if msg_type == "AIMessage":
             content_preview = str(msg.content)[:100] if msg.content else ""
             logger.info(f"   → Response: {content_preview}")
-    
-    repos = extract_repos_from_messages(messages)
+
+    repos = result.get("repos") or []
     logger.info(f"\n{'=' * 80}")
     logger.info(f"RESULT: Found {len(repos)} repositories")
     logger.info(f"{'=' * 80}")
     
     # Show expected vs actual flow
     logger.info("\n" + "=" * 80)
-    logger.info("EXPECTED FLOW (with direct_return):")
+    logger.info("EXPECTED FLOW (list-only fast path):")
     logger.info("=" * 80)
-    logger.info("START → agent (LLM) → tools → END")
-    logger.info("                ↓")
-    logger.info("         Decides to call tool")
-    logger.info("                           ↓")
-    logger.info("                    Fetches data")
-    logger.info("                                    ↓")
-    logger.info("                              Returns data (NO 2nd LLM call)")
+    logger.info("START → planner (LLM) → retrieve → END")
     
     logger.info("\n" + "=" * 80)
-    if len(messages) == 3:
-        logger.info("✅ SUCCESS: Only 1 LLM call (optimized flow)")
-    elif len(messages) == 4:
-        logger.info("❌ WARNING: 2 LLM calls (old flow - agent processed tool result)")
+    if len(messages) == 1:
+        logger.info("✅ SUCCESS: No answer LLM call (list-only fast path)")
+    elif len(messages) == 2:
+        logger.info("⚠️  INFO: Answer LLM ran (non-list behavior)")
     else:
         logger.info(f"⚠️  UNEXPECTED: {len(messages)} messages")
 

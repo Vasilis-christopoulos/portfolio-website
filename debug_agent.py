@@ -1,13 +1,12 @@
 """Debug script to test the agent locally."""
 import asyncio
-import json
 import logging
-import os
+import json
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 
-from app import build_agent_graph, extract_repos_from_messages
+from app import build_agent_graph
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -20,7 +19,7 @@ async def main():
     logger.info("Building agent graph...")
     agent = build_agent_graph()
     
-    query = "Fetch showcase repositories for the portfolio UI. Limit results to 5."
+    query = "Show me your projects"
     logger.info(f"Running agent with query: {query}")
     
     result = await agent.ainvoke(
@@ -32,6 +31,7 @@ async def main():
     print("AGENT RESULT:")
     print("="*80)
     print(f"Keys in result: {result.keys()}")
+    print(f"Plan: {result.get('plan')}")
     print(f"Repos in state: {result.get('repos')}")
     
     print("\n" + "="*80)
@@ -51,10 +51,9 @@ async def main():
             print(f"Tool call ID: {msg.tool_call_id}")
     
     print("\n" + "="*80)
-    print("EXTRACTED REPOS:")
+    print("REPOS:")
     print("="*80)
-    repos = extract_repos_from_messages(messages)
-    print(json.dumps(repos, indent=2, default=str))
+    print(json.dumps(result.get("repos") or [], indent=2, default=str))
 
 
 if __name__ == "__main__":
