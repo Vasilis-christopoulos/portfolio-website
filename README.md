@@ -8,7 +8,7 @@ Built to demonstrate **practical data/AI engineering skills**: RAG pipelines, ve
 
 ---
 
-## ✅ What This Project Shows
+## Main Points
 - **End-to-end agent system**: planning, retrieval, ranking, and response generation.
 - **Data engineering choices**: chunking, hashing, caching, and data storing.
 - **Observability & evals**: tracing and evaluation of agent behavior.
@@ -17,7 +17,7 @@ Built to demonstrate **practical data/AI engineering skills**: RAG pipelines, ve
 
 ---
 
-## 🧭 Project Summary
+## Project Summary
 This service exposes a FastAPI endpoint that answers questions about a portfolio/profile. The system:
 1. **Plans** which sources to consult (repos, profile/CV, or both) and intent declaration to possibly skip calls (when not needed).
 2. **Retrieves** relevant context with vector search + reranking.
@@ -25,7 +25,7 @@ This service exposes a FastAPI endpoint that answers questions about a portfolio
 
 ---
 
-## 🔍 Example Flows (How Users Experience It)
+## Example Flows (How Users Experience It)
 **Example 1 — Recruiter asks about relevant projects**  
 “Do you have any work related to LLM evaluation or agent systems?”  
 ✅ The planner triggers **repo + profile search**, retrieves top repo chunks and resume context, reranks for relevance, and replies with a concise summary for the most relevant projects.
@@ -36,7 +36,7 @@ This service exposes a FastAPI endpoint that answers questions about a portfolio
 
 ---
 
-## 🧱 High-Level Architecture
+## High-Level Architecture
 ```mermaid
 flowchart LR
   U[User / Frontend] -->|HTTP| API[FastAPI Backend]
@@ -56,7 +56,7 @@ flowchart LR
 
 ---
 
-## 🤖 Agent Flow (How It Works)
+## Agent Flow (How It Works)
 ```mermaid
 flowchart TD
   A[Incoming Query] --> B{Rate Limit / Injection Check}
@@ -79,7 +79,7 @@ flowchart TD
 
 ---
 
-## ⚙️ Performance & Reliability Techniques
+## Performance & Reliability Techniques
 - **Supabase caching** of GitHub repos with TTL and content hashing.
 - **Chunked embeddings** with overlap for robust semantic recall as well as context-providing headers.
 - **Rerank skip thresholds** to avoid unnecessary LLM calls when vector scores are decisive.
@@ -91,7 +91,7 @@ flowchart TD
 
 ---
 
-## 🧰 Tech Stack
+## Tech Stack
 - **API**: FastAPI, Uvicorn
 - **LLM Orchestration**: LangGraph, LangChain
 - **Models**: OpenAI (chat + embeddings + optional rerank)
@@ -103,7 +103,7 @@ flowchart TD
 
 ---
 
-## 📡 Core Endpoints
+## Core Endpoints
 - `GET /health` — health check
 - `GET /cv` — download the latest CV
 - `POST /agent/showcase` — agent Q&A + repo cards
@@ -112,7 +112,12 @@ flowchart TD
 
 ---
 
-## 📝 Notes
+## Next Steps
+- Insight dashboard with main insights, such as most frequent questions, most popular repo, etc. using text analytics and data analysis.
+- Admin dashboard for implementing changes without adjusting the codebase.
+- Implementation of AGENTS.md and SKILLS for more robust agent architecture as well as evaluation.
+
+## Notes
 - Supabase schema is defined in `supabase_schema.sql`.
 - Resume documents live in `docs/resume/` (latest modified file is served).
 - The UI and link to the API was done with Lovable
