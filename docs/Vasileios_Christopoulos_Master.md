@@ -3,24 +3,28 @@
 Montreal, Canada | vchristopoulos99@gmail.com | +1 (579) 368 6746 | LinkedIn | GitHub
 
 ## Summary
-Analytics and consulting-oriented professional with an entrepreneurial background, currently pursuing a Master of Management in Analytics at McGill University. Specialized in building Agentic AI systems and data-driven frameworks to support strategic decision-making and business transformation. Expert at translating complex technical architectures into actionable business value for stakeholders.
+Analytics oriented professional with an entrepreneurial background, currently pursuing a Master of Management in Analytics at McGill University. Applying quantitative analysis, agentic AI, and data driven insights to support strategic decisions, automate and improve processes, and enable business transformation. Strong communicator with experience translating complex analyses into actionable recommendations for business stakeholders.
 
 ## Technical Skills
-**AI & Machine Learning:** Generative AI, RAG, Agentic AI (ReAct, Multi-Agent Orchestration), LLMs, Vector Databases, LLM as Judge, MLOps, NLP, Predictive Modeling, Time-Series Analysis.
+**AI & Machine Learning:** Demand forecasting, Generative AI, RAG, Vector Databases, Agentic AI (ReAct, Multi-Agent Orchestration), LLMs, Predictive/Descriptive Modeling, Applied Intelligence, NLP, MLOps, Time-Series Analysis, Decision Trees, Prompt Engineering, Deep Learning
 
-**Data Strategy & Analytics:** ETL Pipelines, Anomaly Detection, Feature Engineering, Hypothesis Testing, EDA, Clustering, Data Scoping, Unstructured Data.
+**Data Strategy & Analytics:** Decision analytics, Hypothesis testing, Digital transformation, Text Analytics, ETL Pipelines, Anomaly Detection, Feature engineering, EDA, Clustering, Data Scoping, Unstructured Data, Data Cleaning, Classification, Model Evaluation, Process Automation,
 
-**Tools & Cloud - Languages:** Python (Pandas, Scikit-learn, PyTorch, FastAPI, Gurobi), SQL, Java, R, JavaScript.
+**Techincal Languages & Core:** Python (Pandas, Scikit-learn, PyTorch, Gurobi, FastAPI, SHAP, XGBoost), SQL (Postgres, MySQL), Java, JavaScript, Excel, Power Query, GitHub, Jupyter.
 
-**Cloud:** AWS (Bedrock, SageMaker, S3, EC2, Lambda), Azure (Functions, Logic Apps, Blob Storage).
+**Cloud & DevOps:** AWS (Cloud Architecture, Bedrock, S3, EC2, API Gateway), Azure (Logic Apps, Event Grid, Blob Storage), GCP,  Docker, GitHub Actions, CI/CD Pipelines, Render.
 
-**AI Stack:** LangChain, LangGraph, LangSmith, Pinecone, OpenAI API, Databricks, RAGAS, HuggingFace.
+**AI Stack:** Demand forecasting, Generative AI, RAG, Vector Databases, Agentic AI (ReAct, Multi-Agent Orchestration), LLMs, Predictive/Descriptive Modeling, Applied Intelligence, NLP, MLOps, Time-Series Analysis, Decision Trees, Prompt Engineering.
 
 **Data Visualization:** Power BI, Streamlit, Plotly, Matplotlib, Seaborn.
 
-**Business & Consulting:** Structured Problem Solving, ROI Analysis, Process Improvement, Agile, Stakeholder Management, Change Management.
+**Business & Consulting:** Problem Solving, ROI Analysis, Process Improvement, Business Transformation, Critical thinker, Change management, Cross-functional collaboration, Team communication, Agile, Entrepreneurial, Structured presentation, Stakeholder Management, Insight Extraction, Task Ownership, Priority Matrix, Data Storytelling, Organization
 
 ## Professional Experience
+### DataSphere Lab - CAE | Data Architect | Montreal, Canada | January 2026 - Present
+- Consulting and architecting a new data management system, transitioning from a legacy infrastructure to a high-performance lean database
+- Coordinating cross-functional teams to optimize system latency by 40% while securing enterprise-grade data integrity.
+
 ### Canadian National Railway | Team Lead - Solutions/Data Architect (MMA Capstone) | Montreal, Canada | Sept 2025 - Present
 - Leading a cross-functional team to design and deliver AI-driven detection systems for railway infrastructure.
 - Impact: targeting a 25% reduction in inspection time and significant maintenance cost savings.
