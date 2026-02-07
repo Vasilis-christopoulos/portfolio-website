@@ -6,19 +6,20 @@ Montreal, Canada | vchristopoulos99@gmail.com | +1 (579) 368 6746 | LinkedIn | G
 Analytics oriented professional with an entrepreneurial background, currently pursuing a Master of Management in Analytics at McGill University. Applying quantitative analysis, agentic AI, and data driven insights to support strategic decisions, automate and improve processes, and enable business transformation. Strong communicator with experience translating complex analyses into actionable recommendations for business stakeholders.
 
 ## Technical Skills
-**AI & Machine Learning:** Demand forecasting, Generative AI, RAG, Vector Databases, Agentic AI (ReAct, Multi-Agent Orchestration), LLMs, Predictive/Descriptive Modeling, Applied Intelligence, NLP, MLOps, Time-Series Analysis, Decision Trees, Prompt Engineering, Deep Learning
+**AI & Machine Learning:** Demand forecasting, Generative AI, RAG, Vector Databases, Agentic AI (ReAct, Multi-Agent Orchestration), LLMs, Predictive/Descriptive Modeling, Applied Intelligence, NLP, MLOps, Time-Series Analysis, Decision Trees, Prompt Engineering
 
-**Data Strategy & Analytics:** Decision analytics, Hypothesis testing, Digital transformation, Text Analytics, ETL Pipelines, Anomaly Detection, Feature engineering, EDA, Clustering, Data Scoping, Unstructured Data, Data Cleaning, Classification, Model Evaluation, Process Automation,
+**Data Strategy & Analytics:** Decision analytics, Hypothesis testing, Digital transformation, Text Analytics, ETL Pipelines, Anomaly Detection, Feature engineering, EDA, Clustering, Data Scoping, Unstructured Data, Data Cleaning, Classification, Model Evaluation, Process Automation
 
-**Techincal Languages & Core:** Python (Pandas, Scikit-learn, PyTorch, Gurobi, FastAPI, SHAP, XGBoost), SQL (Postgres, MySQL), Java, JavaScript, Excel, Power Query, GitHub, Jupyter.
+**Techincal Languages & Core:** Python (Pandas, Scikit-learn, PyTorch, Gurobi, FastAPI, SHAP, XGBoost), SQL (Postgres, MySQL), Java, JavaScript, Excel, Power Query, GitHub, Jupyter
 
-**Cloud & DevOps:** AWS (Cloud Architecture, Bedrock, S3, EC2, API Gateway), Azure (Logic Apps, Event Grid, Blob Storage), GCP,  Docker, GitHub Actions, CI/CD Pipelines, Render.
+**Cloud & DevOps:** AWS (Cloud Architecture, Bedrock, S3, EC2, API Gateway), Azure (Logic Apps, Event Grid, Blob Storage), GCP, Docker, GitHub Actions, CI/CD Pipelines, Render
 
-**AI Stack:** Demand forecasting, Generative AI, RAG, Vector Databases, Agentic AI (ReAct, Multi-Agent Orchestration), LLMs, Predictive/Descriptive Modeling, Applied Intelligence, NLP, MLOps, Time-Series Analysis, Decision Trees, Prompt Engineering.
+**AI Stack:** OpenAI API, LangChain, LangGraph, LangSmith, Pinecone, HuggingFace, GitHub Copilot, Codex, Databricks, AWS Bedrock, AWS SageMaker, Vertex AI, Codex, Databricks Genie, Databricks Agents, RAGAS
 
 **Data Visualization:** Power BI, Streamlit, Plotly, Matplotlib, Seaborn.
 
-**Business & Consulting:** Problem Solving, ROI Analysis, Process Improvement, Business Transformation, Critical thinker, Change management, Cross-functional collaboration, Team communication, Agile, Entrepreneurial, Structured presentation, Stakeholder Management, Insight Extraction, Task Ownership, Priority Matrix, Data Storytelling, Organization
+**Business & Consulting:** Problem Solving, ROI Analysis, Process Improvement, Business Transformation, Critical thinker, Change management, Cross-functional collaboration,
+Team communication, Agile, Entrepreneurial, Structured presentation, Stakeholder Management, Insight Extraction, Task Ownership, Priority Matrix, Data Storytelling, Organization
 
 ## Professional Experience
 ### DataSphere Lab - CAE | Data Architect | Montreal, Canada | January 2026 - Present
@@ -41,6 +42,11 @@ Analytics oriented professional with an entrepreneurial background, currently pu
 - Engineered financial planning tools to reduce waste and improve margins through data-backed inventory management.
 
 ## High-Impact AI Projects
+**Agentic Portfolio Website**
+- Built an agentic RAG chatbot interface with planning, vector search, and reranking to answer recruiter questions, using LangGraph for multi-step orchestration.
+- Implemented production guardrails including rate limiting, prompt-injection detection, caching strategies, and async analytics logging to optimize costs and performance.
+- Stack: Python, FastAPI, LangGraph, LangChain, OpenAI API, Supabase, PostgreSQL, pgvector, GitHub API, Resend, LangSmith
+
 **AI Academic Assistant (Discord)**
 - Developed a RAG-based assistant integrating Google Calendar and AWS S3 for the McGill MMA cohort.
 - Results: reduced document search time and enhanced team collaboration efficiency by over 30%.
