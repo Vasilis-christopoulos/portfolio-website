@@ -116,3 +116,4 @@ flowchart TD
 - Supabase schema is defined in `supabase_schema.sql`.
 - Resume documents live in `docs/resume/` (latest modified file is served).
 - The UI and link to the API was done with Lovable
+- `OPENAI_ANSWER_TEMPERATURE` controls only the final answer model creativity (default `0.2`, clamped to `0.0-1.0`).

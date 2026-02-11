@@ -22,17 +22,17 @@ Analytics oriented professional with an entrepreneurial background, currently pu
 Team communication, Agile, Entrepreneurial, Structured presentation, Stakeholder Management, Insight Extraction, Task Ownership, Priority Matrix, Data Storytelling, Organization
 
 ## Professional Experience
-### DataSphere Lab - CAE | Data Architect | Montreal, Canada | January 2026 - Present
+### DataSphere Lab - CAE (Contract)| Data Architect | Montreal, Canada | January 2026 - Present
 - Consulting and architecting a new data management system, transitioning from a legacy infrastructure to a high-performance lean database
 - Coordinating cross-functional teams to optimize system latency by 40% while securing enterprise-grade data integrity.
 
-### Canadian National Railway | Team Lead - Solutions/Data Architect (MMA Capstone) | Montreal, Canada | Sept 2025 - Present
+### Canadian National Railway | Team Lead - Solutions/Data Architect (Co-op) | Montreal, Canada | Sept 2025 - Present
 - Leading a cross-functional team to design and deliver AI-driven detection systems for railway infrastructure.
 - Impact: targeting a 25% reduction in inspection time and significant maintenance cost savings.
 - Translating multi-modal data (Image, Video, LiDAR) into actionable insights using computer vision and ML.
 - Partnering with senior stakeholders to align technical deliverables with operational and safety goals.
 
-### Thinkr | Consultant | Montreal, Canada | Sept 2025 - Present
+### Thinkr (Co-op) | Consultant | Montreal, Canada | Sept 2025 - Present
 - Advising on go-to-market strategy for Nora AI, a sales outreach automation startup (YC applicant).
 - Conducting deep market and competitive analysis to refine strategic positioning and investment readiness.
 

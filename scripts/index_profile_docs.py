@@ -82,6 +82,63 @@ SECTION_TAGS = [
 ]
 
 
+def normalize_heading(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip().lower())
+
+
+def is_high_impact_projects_section(section_title: Optional[str]) -> bool:
+    if not section_title:
+        return False
+    normalized = normalize_heading(section_title).replace("-", " ")
+    return "high impact ai projects" in normalized
+
+
+def extract_markdown_bold_heading(line: str) -> Optional[str]:
+    match = re.fullmatch(r"\*\*(.+?)\*\*:?$", line.strip())
+    if not match:
+        return None
+    heading = match.group(1).strip()
+    return heading or None
+
+
+def split_high_impact_projects(body: str) -> List[Tuple[str, str]]:
+    """Split project sections using markdown bold headings as project titles."""
+    entries: List[Tuple[str, str]] = []
+    current_title: Optional[str] = None
+    current_lines: List[str] = []
+    preamble: List[str] = []
+    for raw_line in body.splitlines():
+        line = raw_line.strip()
+        if not line:
+            if current_title and current_lines:
+                current_lines.append("")
+            elif not current_title and preamble:
+                preamble.append("")
+            continue
+        heading = extract_markdown_bold_heading(line)
+        if heading:
+            if current_title is not None:
+                entries.append((current_title, "\n".join(current_lines).strip()))
+            current_title = heading
+            current_lines = []
+            continue
+        if current_title is None:
+            preamble.append(line)
+            continue
+        current_lines.append(line)
+    if current_title is not None:
+        entries.append((current_title, "\n".join(current_lines).strip()))
+    if len(entries) < 2:
+        return []
+    preamble_text = "\n".join(preamble).strip()
+    if preamble_text:
+        return [
+            (title, f"{preamble_text}\n{content}".strip())
+            for title, content in entries
+        ]
+    return entries
+
+
 def iter_files(paths: Iterable[Path]) -> List[Path]:
     files: List[Path] = []
     for path in paths:
@@ -356,6 +413,23 @@ def build_chunk_header(
 def chunk_profile_section(section: str) -> List[str]:
     section_title, entry_title, body = split_section_header(section)
     tags = get_section_tags(section_title)
+    if is_high_impact_projects_section(section_title) and not entry_title and body:
+        project_entries = split_high_impact_projects(body)
+        if project_entries:
+            project_chunks: List[str] = []
+            for project_title, project_body in project_entries:
+                project_header = build_chunk_header(section_title, project_title, tags)
+                if not project_body:
+                    project_chunks.append(project_header)
+                    continue
+                body_chunks = chunk_text(project_body)
+                if not body_chunks:
+                    project_chunks.append(project_header)
+                    continue
+                project_chunks.extend(
+                    f"{project_header}\n{chunk}".strip() for chunk in body_chunks
+                )
+            return project_chunks
     header = build_chunk_header(section_title, entry_title, tags)
     if not body:
         return [header]
