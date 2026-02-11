@@ -105,6 +105,13 @@ RESEND_API_URL = "https://api.resend.com/emails"
 # --- Retrieval, embeddings, and ranking ---------------------------------------
 REPO_CACHE_TTL_SECONDS = int(os.getenv("REPO_CACHE_TTL_SECONDS", "1800"))
 OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "900"))
+try:
+    OPENAI_ANSWER_TEMPERATURE = float(
+        os.getenv("OPENAI_ANSWER_TEMPERATURE", "0.2")
+    )
+except ValueError:
+    OPENAI_ANSWER_TEMPERATURE = 0.2
+OPENAI_ANSWER_TEMPERATURE = max(0.0, min(1.0, OPENAI_ANSWER_TEMPERATURE))
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "1536"))
 RAG_TOP_K = int(os.getenv("RAG_TOP_K", "5"))
@@ -158,7 +165,15 @@ SYSTEM_PROMPT = (
     "Assume you are speaking to recruiters, hiring managers, and people evaluating whether to hire you. "
     "Keep a professional, confident, and warm tone with a touch of personality; avoid robotic phrasing. "
     "Be specific, concrete, and concise; prefer outcomes and impact over generic claims. "
+    "Default to concise responses and stop when the question is answered. "
+    "Start with a direct answer, then add short markdown bullet points only when extra detail helps. "
+    "For lists or comparisons, prefer single-level bullet points with concrete evidence such as impact, tools, and outcomes. "
+    "Avoid long preambles, repeated claims, and oversized paragraphs. "
     "Vary sentence structure and avoid repeating stock phrases. "
+    "For motivational or fit questions (for example, 'Why consulting?'), lead with values, working style, and personality before evidence. "
+    "Use projects/experience as brief support, not the main body, unless the user asks for detailed examples. "
+    "Mention specific companies, projects, tools, or metrics only when they appear in the provided context. "
+    "If context does not support a specific claim, say so plainly and ask a short clarification question. "
     "If both repo and profile context are present, synthesize across them. "
     "If the answer is missing from the context, ask a short clarification question. "
     "Use cached repo summaries for comparisons when provided. "
@@ -176,7 +191,7 @@ PLANNER_SYSTEM_PROMPT = (
     "\"cv_intent\": bool}. "
     "Guidance: use_repo_list for listing/showcase requests; use_repo_search for topical repo questions; "
     "use_profile_search for resume/background/experience or possible projects (including fit/strengths questions "
-    "like 'why should I hire you'); should_compare for ranking/choosing. "
+    "like 'why should I hire you' and motivation questions like 'why consulting'); should_compare for ranking/choosing. "
     "Projects may be described only in the CV, so for project-related questions that are not pure listing, "
     "set both use_repo_search and use_profile_search. "
     "If the query could refer to either repos or CV experience, set both use_repo_search and use_profile_search. "
@@ -208,6 +223,13 @@ RERANK_SYSTEM_PROMPT = (
     "Do not include any other text."
 )
 
+BEHAVIORAL_RESPONSE_SYSTEM_PROMPT = (
+    "Behavioral answer mode: for motivation/fit questions, start with a direct personal viewpoint in 2-4 sentences. "
+    "Highlight work style and mindset first (business impact orientation, hybrid technical and interpersonal strengths, ownership, learning agility). "
+    "Then add at most 1 concise evidence bullet from provided context when available. "
+    "Avoid project lists unless the user explicitly asks for examples."
+)
+
 MAX_CONTEXT_REPOS = 8
 MAX_SUMMARY_DESCRIPTION_CHARS = 200
 MAX_REPO_SEARCH_RESULTS = 5
@@ -232,6 +254,10 @@ PROMPT_INJECTION_RESPONSE = (
     "I can only answer questions about my experience, projects, and skills. "
     "Please ask about my work or portfolio."
 )
+MISSING_CONTEXT_RESPONSE = (
+    "I don't have enough verified context to answer that accurately yet. "
+    "Could you clarify the specific role, company, or project you want me to focus on?"
+)
 PROMPT_INJECTION_RULES = [
     (
         "override_instructions",
@@ -253,6 +279,17 @@ PROMPT_INJECTION_RULES = [
         "jailbreak_keyword",
         re.compile(r"(?i)\b(jailbreak|prompt injection|dan)\b"),
     ),
+]
+
+BEHAVIORAL_QUERY_PATTERNS = [
+    re.compile(r"(?i)\bwhy consulting\b"),
+    re.compile(r"(?i)\bwhy (this|the) (role|position|job|company|firm)\b"),
+    re.compile(r"(?i)\bwhy should i hire you\b"),
+    re.compile(r"(?i)\b(why are you a good fit|good fit)\b"),
+    re.compile(r"(?i)\bwhat motivates you\b"),
+    re.compile(r"(?i)\btell me about yourself\b"),
+    re.compile(r"(?i)\bhow do you (work|collaborate|learn)\b"),
+    re.compile(r"(?i)\bwhat kind of (team|environment)\b"),
 ]
 
 
@@ -447,6 +484,38 @@ def detect_prompt_injection(query: str) -> Optional[str]:
         if pattern.search(cleaned):
             return name
     return None
+
+
+def is_behavioral_fit_question(query: str) -> bool:
+    """Detect motivation/fit questions that should use a more personal framing."""
+    cleaned = (query or "").strip()
+    if not cleaned:
+        return False
+    return any(pattern.search(cleaned) for pattern in BEHAVIORAL_QUERY_PATTERNS)
+
+
+def should_request_context_clarification(
+    plan: Optional[Dict[str, Any]],
+    repo_search_context: List[Dict[str, Any]],
+    profile_context: List[Dict[str, Any]],
+    repo_summaries: List[Dict[str, Any]],
+) -> bool:
+    """Block unsupported answers when retrieval returned no relevant context."""
+    if not plan:
+        return False
+    requested_retrieval = bool(
+        plan.get("use_repo_search") or plan.get("use_profile_search")
+    )
+    if (
+        requested_retrieval
+        and not repo_search_context
+        and not profile_context
+        and not repo_summaries
+    ):
+        return True
+    if plan.get("should_compare") and not repo_summaries and not repo_search_context:
+        return True
+    return False
 
 
 def get_last_user_text(messages: List[Any]) -> str:
@@ -1617,7 +1686,7 @@ def build_agent_graph():
 
     llm = ChatOpenAI(
         model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-        temperature=0,
+        temperature=OPENAI_ANSWER_TEMPERATURE,
         max_tokens=OPENAI_MAX_TOKENS,
     )
     planner_llm = ChatOpenAI(
@@ -1755,10 +1824,22 @@ def build_agent_graph():
             question = state.get("clarification_question") or "Could you clarify what you want to know?"
             return {"messages": [AIMessage(content=question)]}
         messages = state.get("messages", [])
-        context_messages: List[Any] = [SystemMessage(content=SYSTEM_PROMPT)]
+        last_user_text = get_last_user_text(messages)
         repo_search_context = state.get("repo_search_context") or []
         profile_context = state.get("profile_context") or []
         repo_summaries = state.get("repo_summaries") or []
+        if should_request_context_clarification(
+            plan,
+            repo_search_context,
+            profile_context,
+            repo_summaries,
+        ):
+            return {"messages": [AIMessage(content=MISSING_CONTEXT_RESPONSE)]}
+        context_messages: List[Any] = [SystemMessage(content=SYSTEM_PROMPT)]
+        if is_behavioral_fit_question(last_user_text):
+            context_messages.append(
+                SystemMessage(content=BEHAVIORAL_RESPONSE_SYSTEM_PROMPT)
+            )
         if repo_search_context:
             context_messages.append(
                 SystemMessage(
